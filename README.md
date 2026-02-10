@@ -4,36 +4,39 @@ A demo chat application using the Claude Agent SDK with a React frontend, deploy
 
 ```mermaid
 graph LR
-    subgraph Local
-        Browser["React Frontend<br/>(localhost:5173)"]
-        Proxy["Local Proxy<br/>(localhost:3001)"]
+    subgraph client["Client"]
+        Browser["React Frontend"]
     end
 
-    subgraph AgentCore["AWS Bedrock AgentCore Runtime"]
-        Auth["OAuth JWT<br/>Authorizer"]
+    subgraph AgentCore["Server: AgentCore <br/>"]
+        Auth["AgentCore Identity<br/>OAuth JWT Authorizer"]
 
-        subgraph Container["Application Server (MicroVM per Session)"]
-            Invocations["Invocations API<br/>POST /invocations"]
-            WS["WebSocket Server<br/>/ws"]
+        subgraph Container["AgentCore Runtime <br/>Isolated MicroVM <br/>per Session ID"]
+            invisible1[" "]
+            invisible2[" "]
+            Invocations["POST /invocations<br/>Invocations API"]
+            WS["/ws<br/>WebSocket Server"]
             Store["ChatStore<br/>(in-memory)"]
             SDK["Claude Agent SDK"]
             Invocations --> Store
             WS --> Store
             WS --> SDK
         end
+        style invisible1 fill:none,stroke:none
+        style invisible2 fill:none,stroke:none
     end
 
-    subgraph Bedrock["AWS Bedrock"]
-        Claude["Claude Model API"]
+    subgraph Bedrock["AWS Bedrock LLM"]
+        Claude["Claude API"]
     end
 
-    Browser --> Proxy
-    Proxy -- "HTTP: chat sessions CRUD" --> Auth --> Invocations
-    Proxy -- "WebSocket: real-time<br/>chat messages" --> Auth
+    Browser -- "HTTP: <br/>chat sessions CRUD" --> Auth --> Invocations
+    Browser -- "WebSocket: <br/>real-time chat messages" --> Auth
     Auth --> WS
-    SDK -- "InvokeModel" --> Claude
+    SDK -- "Invoke Model" --> Claude
 ```
-
+## Original Architecture
+![origianl architecture](./diagram.png)
 ## Getting Started
 
 ### Prerequisites
@@ -72,9 +75,9 @@ npm run dev:stop
 
 Open http://localhost:5173 and sign in with the test credentials printed by `deploy.sh`.
 
-All browser traffic (REST and WebSocket) goes through a local proxy (`server/ws-proxy.ts`)
-which forwards requests to AgentCore with `Authorization` and
-`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` headers for session affinity.
+Browser traffic is routed through a lightweight local proxy (`server/ws-proxy.ts` on port 3001)
+that adds `Authorization` and `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` headers
+before forwarding to AgentCore.
 
 ## Production Considerations
 
