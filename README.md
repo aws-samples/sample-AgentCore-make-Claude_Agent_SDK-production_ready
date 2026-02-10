@@ -95,7 +95,11 @@ This is an example app for demonstration purposes. For production use, consider:
 
 ## Demo
 
+<<<<<<< HEAD
 ![Demo](demo.gif)## My Project
+=======
+![Demo](demo.gif)
+>>>>>>> 71ed2bc (update README)
 
 ## Security
 
@@ -103,5 +107,9 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 
 ## License
 
+<<<<<<< HEAD
 This library is licensed under the MIT-0 License. See the LICENSE file.
 
+=======
+This library is licensed under the MIT-0 License. See the LICENSE file.
+>>>>>>> 71ed2bc (update README)
