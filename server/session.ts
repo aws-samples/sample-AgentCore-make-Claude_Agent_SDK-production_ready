@@ -9,9 +9,14 @@ export class Session {
   private agentSession: AgentSession;
   private isListening = false;
 
-  constructor(chatId: string) {
+  constructor(chatId: string, sessionId?: string) {
     this.chatId = chatId;
-    this.agentSession = new AgentSession();
+    // Load existing conversation history for session continuity
+    const existingMessages = chatStore.getMessages(chatId);
+    const history = existingMessages
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role, content: m.content }));
+    this.agentSession = new AgentSession(sessionId || chatId, history);
   }
 
   // Start listening to agent output (call once)

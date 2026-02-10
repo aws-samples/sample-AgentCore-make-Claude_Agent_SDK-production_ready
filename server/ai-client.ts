@@ -60,27 +60,45 @@ class MessageQueue {
 export class AgentSession {
   private queue = new MessageQueue();
   private outputIterator: AsyncIterator<any> | null = null;
+  public readonly sessionId: string | undefined;
 
-  constructor() {
+  constructor(sessionId?: string, conversationHistory?: Array<{role: string, content: string}>) {
+    this.sessionId = sessionId;
+
+    // Build system prompt, including conversation history if available
+    let systemPrompt = SYSTEM_PROMPT;
+    if (conversationHistory && conversationHistory.length > 0) {
+      const historyText = conversationHistory
+        .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+        .join('\n');
+      systemPrompt += `\n\nBelow is the previous conversation history with this user. Remember all context from it and continue naturally:\n\n${historyText}`;
+    }
+
     // Start the query immediately with the queue as input
     // Cast to any - SDK accepts simpler message format at runtime
+    const options: any = {
+      maxTurns: 100,
+      model: process.env.ANTHROPIC_MODEL || "opus",
+      allowedTools: [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+      ],
+      systemPrompt,
+      allowDangerouslySkipPermissions: true,
+      env: process.env,
+    };
+
+    console.log(`[AgentSession] Creating new session (chat: ${sessionId || "none"}, history: ${conversationHistory?.length || 0} messages)`);
+
     this.outputIterator = query({
       prompt: this.queue as any,
-      options: {
-        maxTurns: 100,
-        model: "opus",
-        allowedTools: [
-          "Bash",
-          "Read",
-          "Write",
-          "Edit",
-          "Glob",
-          "Grep",
-          "WebSearch",
-          "WebFetch",
-        ],
-        systemPrompt: SYSTEM_PROMPT,
-      },
+      options,
     })[Symbol.asyncIterator]();
   }
 

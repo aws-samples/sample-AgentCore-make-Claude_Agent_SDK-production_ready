@@ -44,11 +44,23 @@ class ChatStore {
     return this.chats.delete(id);
   }
 
-  addMessage(chatId: string, message: Omit<ChatMessage, "id" | "chatId" | "timestamp">): ChatMessage {
-    const messages = this.messages.get(chatId);
-    if (!messages) {
-      throw new Error(`Chat ${chatId} not found`);
+  // Ensure a chat exists in the store (auto-create if needed for multi-instance support)
+  ensureChat(chatId: string, title?: string): Chat {
+    let chat = this.chats.get(chatId);
+    if (!chat) {
+      const now = new Date().toISOString();
+      chat = { id: chatId, title: title || "New Chat", createdAt: now, updatedAt: now };
+      this.chats.set(chatId, chat);
+      this.messages.set(chatId, []);
     }
+    return chat;
+  }
+
+  addMessage(chatId: string, message: Omit<ChatMessage, "id" | "chatId" | "timestamp">): ChatMessage {
+    // Auto-create chat if it doesn't exist (handles multi-instance case where
+    // chat was created on a different container but messages arrive here)
+    this.ensureChat(chatId);
+    const messages = this.messages.get(chatId)!;
 
     const newMessage: ChatMessage = {
       id: uuidv4(),

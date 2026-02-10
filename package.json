@@ -7,11 +7,18 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch server/server.ts",
     "dev:client": "vite --port 5173",
+    "dev:runtime": "tsx watch server/runtime-server.ts",
+    "dev:proxy": "tsx watch server/ws-proxy.ts",
+    "dev:deployed": "concurrently \"npm run dev:proxy\" \"npm run dev:client\"",
+    "dev:stop": "lsof -ti:3001,5173 | xargs kill -9 2>/dev/null; echo 'Stopped processes on ports 3001 and 5173'",
     "start": "tsx server/server.ts",
-    "build": "vite build"
+    "start:runtime": "tsx server/runtime-server.ts",
+    "build": "vite build",
+    "build:server": "tsc --project tsconfig.server.json"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.28",
+    "aws-jwt-verify": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
