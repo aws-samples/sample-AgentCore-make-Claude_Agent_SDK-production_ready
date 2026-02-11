@@ -17,7 +17,7 @@ graph LR
             Invocations["POST /invocations<br/>Invocations API"]
             WS["/ws<br/>WebSocket Server"]
             Store["ChatStore<br/>(in-memory)"]
-            SDK["Claude Agent SDK"]
+            SDK["Claude Agent SDK<br/>Claude Code CLI"]
             Invocations --> Store
             WS --> Store
             WS --> SDK
