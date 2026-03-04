@@ -37,6 +37,7 @@ graph LR
 ```
 ## Original Architecture
 ![origianl architecture](./diagram.png)
+
 ## Getting Started
 
 ### Prerequisites
@@ -45,39 +46,38 @@ graph LR
 - AWS CLI configured with credentials
 - Python 3.10+ (for the AgentCore Starter Toolkit; use a virtualenv if needed)
 
-### One-Click Deployment
+### Deploy
 
 ```bash
-# Install dependencies
-npm install
-
-# Deploy to AgentCore Runtime (builds container via CodeBuild, sets up Cognito auth)
 chmod +x deploy.sh
 ./deploy.sh
 ```
 
-The deploy script handles everything:
-1. Configures AgentCore Runtime agent
-2. Sets up Cognito authentication with test users
-3. Configures OAuth JWT authorizer
-4. Builds and deploys ARM64 container via CodeBuild (no local Docker required)
-5. Generates local config files (`.env`, `client/.env`)
+This handles everything: AgentCore Runtime setup, Cognito auth, ARM64 container build via CodeBuild (no local Docker), S3 + CloudFront frontend deployment.
 
-### Running
+### Access
 
+**Production** — open the CloudFront URL printed at the end of deploy (e.g. `https://d33sm1d7ly2wjz.cloudfront.net`). No local server needed.
+
+**Local dev** — for development against the deployed AgentCore backend:
 ```bash
-# Start the local proxy + frontend
-npm run dev:deployed
-
-# Stop all dev processes
-npm run dev:stop
+npm run dev:deployed   # proxy + Vite dev server
+# Open http://localhost:5173
 ```
 
-Open http://localhost:5173 and sign in with the test credentials printed by `deploy.sh`.
+Sign in with the test credentials printed by `deploy.sh`.
 
-Browser traffic is routed through a lightweight local proxy (`server/ws-proxy.ts` on port 3001)
-that adds `Authorization` and `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` headers
-before forwarding to AgentCore.
+### Tear Down
+
+```bash
+./deploy.sh --destroy   # removes CloudFront/S3, AgentCore runtime, Cognito, config files
+```
+
+### Architecture
+
+**Production**: CloudFront serves the React app from S3 and routes `/invocations*` (REST) and `/ws*` (WebSocket) to AgentCore. Same-origin eliminates CORS. A CloudFront Function injects the JWT from query params into the `Authorization` header for WebSocket connections.
+
+**Local dev**: Vite proxies `/invocations` and `/ws` to a local bridge (`server/ws-proxy.ts` on port 3001) that forwards to AgentCore with auth headers.
 
 ## Production Considerations
 

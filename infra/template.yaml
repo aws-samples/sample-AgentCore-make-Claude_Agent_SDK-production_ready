@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: S3 + CloudFront frontend for AgentCore Chat App
+
+Parameters:
+  EncodedAgentArn:
+    Type: String
+    Description: URL-encoded AgentCore Agent ARN (pre-encoded by deploy.sh)
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+    Description: AWS region where AgentCore is deployed
+
+Resources:
+  # ─────────────────────────────────────────
+  # S3 Bucket (private, OAC-only access)
+  # ─────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ─────────────────────────────────────────
+  # CloudFront Origin Access Control (OAC)
+  # ─────────────────────────────────────────
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ─────────────────────────────────────────
+  # CloudFront Function (WS auth: query param → header)
+  # ─────────────────────────────────────────
+  WsAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-ws-auth"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Extract token/sessionId from query params into headers for WebSocket
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          var request = event.request;
+          var params = request.querystring;
+
+          if (params.token) {
+            request.headers['authorization'] = { value: 'Bearer ' + params.token.value };
+            delete params.token;
+          }
+
+          if (params.sessionId) {
+            request.headers['x-amzn-bedrock-agentcore-runtime-session-id'] = {
+              value: params.sessionId.value
+            };
+          }
+
+          return request;
+        }
+
+  # ─────────────────────────────────────────
+  # CloudFront Distribution
+  # ─────────────────────────────────────────
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+
+        Origins:
+          # S3 origin for static assets
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+
+          # AgentCore origin for REST + WebSocket
+          - Id: AgentCoreOrigin
+            DomainName: !Sub "bedrock-agentcore.${AwsRegion}.amazonaws.com"
+            OriginPath: !Sub "/runtimes/${EncodedAgentArn}"
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 60
+
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress: true
+
+        CacheBehaviors:
+          # REST: /invocations* → AgentCore
+          - PathPattern: "/invocations*"
+            TargetOriginId: AgentCoreOrigin
+            ViewerProtocolPolicy: https-only
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader (managed)
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+
+          # WebSocket: /ws* → AgentCore (with CloudFront Function)
+          - PathPattern: "/ws*"
+            TargetOriginId: AgentCoreOrigin
+            ViewerProtocolPolicy: https-only
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader (managed)
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt WsAuthFunction.FunctionARN
+
+        # SPA routing: 403/404 → /index.html
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  BucketName:
+    Value: !Ref FrontendBucket
+    Description: S3 bucket for frontend assets
+
+  DistributionId:
+    Value: !Ref Distribution
+    Description: CloudFront distribution ID
+
+  DistributionDomain:
+    Value: !GetAtt Distribution.DomainName
+    Description: CloudFront domain name
+
+  CloudFrontUrl:
+    Value: !Sub "https://${Distribution.DomainName}"
+    Description: Full CloudFront URL

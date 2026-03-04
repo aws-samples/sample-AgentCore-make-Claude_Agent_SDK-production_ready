@@ -22,9 +22,12 @@ interface Message {
 }
 
 // Use environment variables or defaults for development
-// VITE_API_BASE: AgentCore Runtime endpoint (e.g., https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/{arn})
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
-const WS_BASE = import.meta.env.VITE_WS_BASE || `ws://localhost:8080`;
+// In production (CloudFront), empty API_BASE = same-origin; WS_BASE auto-detects protocol
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+const WS_BASE = import.meta.env.VITE_WS_BASE || (() => {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}`;
+})();
 const COGNITO_POOL_ID = import.meta.env.VITE_COGNITO_POOL_ID || "";
 const COGNITO_CLIENT_ID = import.meta.env.VITE_COGNITO_CLIENT_ID || "";
 const AWS_REGION = COGNITO_POOL_ID.split("_")[0] || "us-east-1";
@@ -108,11 +111,11 @@ export default function App() {
     setMessages([]);
   };
 
-  // WebSocket URL via local proxy that bridges to AgentCore
-  // Browser → ws-proxy (token in query param) → AgentCore (token in Authorization header)
-  // Include sessionId so AgentCore routes to the same container for session affinity
+  // WebSocket URL — in production, CloudFront Function converts query params to headers
+  // In dev, Vite proxy forwards to ws-proxy which does the same conversion
+  // Include qualifier=DEFAULT (required by AgentCore) and sessionId for session affinity
   const wsUrl = authToken && selectedChatId
-    ? `${WS_BASE}/ws?token=${authToken}&sessionId=${encodeURIComponent(selectedChatId)}`
+    ? `${WS_BASE}/ws?qualifier=DEFAULT&token=${encodeURIComponent(authToken)}&sessionId=${encodeURIComponent(selectedChatId)}`
     : null;
 
   // Handle WebSocket messages
