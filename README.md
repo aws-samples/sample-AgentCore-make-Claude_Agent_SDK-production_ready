@@ -8,15 +8,15 @@ graph LR
         Browser["React Frontend"]
     end
 
-    subgraph AgentCore["Server: AgentCore <br/>"]
+    subgraph AgentCore["Server: AgentCore"]
         Auth["AgentCore Identity<br/>OAuth JWT Authorizer"]
 
-        subgraph Container["AgentCore Runtime <br/>Isolated MicroVM <br/>per Session ID"]
+        subgraph Container["AgentCore Runtime<br/>Isolated MicroVM per Session ID"]
             invisible1[" "]
             invisible2[" "]
             Invocations["POST /invocations<br/>Invocations API"]
             WS["/ws<br/>WebSocket Server"]
-            Store["ChatStore<br/>(in-memory)"]
+            Store["Store<br/>(feature-flagged)"]
             SDK["Claude Agent SDK<br/>Claude Code CLI"]
             Invocations --> Store
             WS --> Store
@@ -26,6 +26,11 @@ graph LR
         style invisible2 fill:none,stroke:none
     end
 
+    subgraph Memory["AgentCore Memory"]
+        STM["STM<br/>Short-Term Memory<br/>(message events)"]
+        LTM["LTM<br/>Long-Term Memory<br/>(semantic extraction)"]
+    end
+
     subgraph Bedrock["AWS Bedrock LLM"]
         Claude["Claude API"]
     end
@@ -33,6 +38,8 @@ graph LR
     Browser -- "HTTP: <br/>chat sessions CRUD" --> Auth --> Invocations
     Browser -- "WebSocket: <br/>real-time chat messages" --> Auth
     Auth --> WS
+    Store -- "CreateEvent / ListEvents" --> STM
+    Store -- "RetrieveMemoryRecords" --> LTM
     SDK -- "Invoke Model" --> Claude
 ```
 ## Original Architecture
@@ -81,17 +88,15 @@ Sign in with the test credentials printed by `deploy.sh`.
 
 ## Production Considerations
 
-This is an example app for demonstration purposes. For production use, consider:
+1. **Isolate the Agent SDK** - Resolved. The Agent SDK runs inside an AgentCore Runtime container with per-session microVM isolation and a 15-min idle timeout.
 
-1. **Isolate the Agent SDK** - Resolved. The Agent SDK runs inside an AgentCore Runtime container, isolated from the frontend. AgentCore manages container lifecycle, scaling, and session affinity. Each session gets a dedicated microVM with a configurable idle timeout (default 15 min).
+2. **Persistent storage** - Resolved. **AgentCore Memory (STM)** replaces the in-memory `ChatStore`. Messages and chat metadata persist across container restarts via the Memory API. Feature-flagged: set `AGENTCORE_MEMORY_ID` to enable, otherwise falls back to in-memory.
 
-2. **Persistent storage** - Replace the in-memory `ChatStore` with a database. Currently all chats are lost on container restart. Coming soon: **AgentCore Memory** will provide managed persistent storage for agent conversations.
+3. **Cross-session context** - Resolved. **AgentCore Memory (LTM)** uses a semantic extraction strategy to auto-extract facts from conversations. New chats retrieve relevant context via `RetrieveMemoryRecords` semantic search, so the agent remembers information across sessions.
 
-3. **Transcript syncing** - For Agent Sessions to be persisted across container restarts, conversation transcripts need to be synced with external storage. Coming soon: **AgentCore Memory** will handle transcript persistence and restoration automatically.
+4. **Bounded context window** - Resolved. Instead of injecting unbounded conversation history into the system prompt, only the last 20 STM turns + top 5 LTM records are included.
 
-4. **Authentication** - Add user authentication and authorization. Currently using Cognito test users created by the toolkit. Coming soon: **AgentCore Identity** will provide managed identity and access control for multi-tenant agent applications.
-
-> Items 2-4 will be addressed with AgentCore Memory and AgentCore Identity in an upcoming update.
+5. **Authentication** - Cognito test users via `agentcore identity setup-cognito`. AgentCore validates JWTs at the platform level.
 
 ## Demo
 

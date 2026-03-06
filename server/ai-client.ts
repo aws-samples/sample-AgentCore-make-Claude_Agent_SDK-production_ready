@@ -62,16 +62,23 @@ export class AgentSession {
   private outputIterator: AsyncIterator<any> | null = null;
   public readonly sessionId: string | undefined;
 
-  constructor(sessionId?: string, conversationHistory?: Array<{role: string, content: string}>) {
+  constructor(sessionId?: string, conversationHistory?: Array<{role: string, content: string}>, ltmContext?: string[]) {
     this.sessionId = sessionId;
 
-    // Build system prompt, including conversation history if available
+    // Build system prompt with bounded context sections
     let systemPrompt = SYSTEM_PROMPT;
+
+    // LTM: cross-session semantic context (top-k records)
+    if (ltmContext && ltmContext.length > 0) {
+      systemPrompt += `\n\nRelevant context from previous conversations:\n${ltmContext.map(r => `- ${r}`).join('\n')}`;
+    }
+
+    // STM: recent conversation turns (bounded, not full history)
     if (conversationHistory && conversationHistory.length > 0) {
       const historyText = conversationHistory
         .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
         .join('\n');
-      systemPrompt += `\n\nBelow is the previous conversation history with this user. Remember all context from it and continue naturally:\n\n${historyText}`;
+      systemPrompt += `\n\nRecent conversation:\n\n${historyText}`;
     }
 
     // Start the query immediately with the queue as input

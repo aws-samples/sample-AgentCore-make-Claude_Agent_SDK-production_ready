@@ -15,7 +15,7 @@ import cors from "cors";
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { WSClient, IncomingWSMessage } from "./types.js";
-import { chatStore } from "./chat-store.js";
+import { store, useMemory } from "./store.js";
 import { Session } from "./session.js";
 import { verifyWebSocketToken } from "./auth.js";
 
@@ -29,11 +29,44 @@ app.use(express.json());
 // Session management
 const sessions: Map<string, Session> = new Map();
 
-function getOrCreateSession(chatId: string, sessionId?: string): Session {
+/**
+ * Decode a JWT payload without verification.
+ * Safe because AgentCore's customJWTAuthorizer already validated the token.
+ */
+function decodeJwtPayload(token: string): any {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract actorId from a JWT token or request context.
+ * Priority: JWT sub claim > JWT cognito:username > "anonymous"
+ */
+function getActorIdFromToken(token?: string | null): string {
+  if (!token) return "anonymous";
+  const payload = decodeJwtPayload(token);
+  return payload?.sub || payload?.["cognito:username"] || "anonymous";
+}
+
+/**
+ * Extract JWT from Authorization header (Bearer scheme).
+ */
+function extractBearerToken(req: any): string | null {
+  const auth = req?.headers?.authorization;
+  if (!auth) return null;
+  const parts = auth.split(" ");
+  return parts.length === 2 && parts[0] === "Bearer" ? parts[1] : parts[0] || null;
+}
+
+async function getOrCreateSession(chatId: string, actorId: string, sessionId?: string): Promise<Session> {
   let session = sessions.get(chatId);
   if (!session) {
-    // Pass sessionId to enable session resumption
-    session = new Session(chatId, sessionId);
+    session = await Session.create(chatId, actorId, sessionId);
     sessions.set(chatId, session);
   }
   return session;
@@ -85,8 +118,10 @@ app.post("/invocations", async (req, res) => {
     }
 
     const { method, path, body, sessionId } = input;
+    // Extract actorId by decoding the JWT (already verified by AgentCore authorizer)
+    const actorId = getActorIdFromToken(extractBearerToken(req));
 
-    console.log(`[Invocation] ${method} ${path} (session: ${sessionId || "none"})`);
+    console.log(`[Invocation] ${method} ${path} (session: ${sessionId || "none"}, actor: ${actorId})`);
 
     // Route to appropriate handler
     let result: any;
@@ -95,18 +130,26 @@ app.post("/invocations", async (req, res) => {
     try {
       if (method === "GET" && path === "/api/chats") {
         // Get all chats
-        result = chatStore.getAllChats();
+        result = useMemory
+          ? await (store as any).getAllChats(actorId)
+          : (store as any).getAllChats();
       } else if (method === "POST" && path === "/api/chats") {
         // Create new chat - use sessionId as chat ID if provided for session continuity
         if (sessionId) {
-          result = chatStore.ensureChat(sessionId, body?.title);
+          result = useMemory
+            ? await (store as any).ensureChat(actorId, sessionId, body?.title)
+            : (store as any).ensureChat(sessionId, body?.title);
         } else {
-          result = chatStore.createChat(body?.title);
+          result = useMemory
+            ? await (store as any).createChat(actorId, body?.title)
+            : (store as any).createChat(body?.title);
         }
       } else if (method === "GET" && path.match(/^\/api\/chats\/([^/]+)$/)) {
         // Get single chat
         const chatId = path.split("/")[3];
-        result = chatStore.getChat(chatId);
+        result = useMemory
+          ? await (store as any).getChat(actorId, chatId)
+          : (store as any).getChat(chatId);
         if (!result) {
           statusCode = 404;
           result = { error: "Chat not found" };
@@ -114,7 +157,9 @@ app.post("/invocations", async (req, res) => {
       } else if (method === "DELETE" && path.match(/^\/api\/chats\/([^/]+)$/)) {
         // Delete chat
         const chatId = path.split("/")[3];
-        const deleted = chatStore.deleteChat(chatId);
+        const deleted = useMemory
+          ? await (store as any).deleteChat(actorId, chatId)
+          : (store as any).deleteChat(chatId);
         if (!deleted) {
           statusCode = 404;
           result = { error: "Chat not found" };
@@ -129,7 +174,9 @@ app.post("/invocations", async (req, res) => {
       } else if (method === "GET" && path.match(/^\/api\/chats\/([^/]+)\/messages$/)) {
         // Get chat messages
         const chatId = path.split("/")[3];
-        result = chatStore.getMessages(chatId);
+        result = useMemory
+          ? await (store as any).getMessages(actorId, chatId)
+          : (store as any).getMessages(chatId);
       } else {
         statusCode = 404;
         result = { error: `Route not found: ${method} ${path}` };
@@ -197,8 +244,11 @@ server.on("upgrade", async (request, socket, head) => {
 });
 
 wss.on("connection", (ws: WSClient, request) => {
-  const user = (request as any).user;
-  console.log(`[WebSocket] Client connected (user: ${user?.username || "anonymous"})`);
+  // Extract actorId by decoding the JWT from query param or Authorization header
+  const url = new URL(request.url || "", `http://${request.headers.host}`);
+  const wsToken = url.searchParams.get("token") || extractBearerToken(request);
+  const actorId = getActorIdFromToken(wsToken);
+  console.log(`[WebSocket] Client connected (actor: ${actorId})`);
   ws.isAlive = true;
 
   ws.send(JSON.stringify({ type: "connected", message: "Connected to AgentCore chat server" }));
@@ -207,18 +257,20 @@ wss.on("connection", (ws: WSClient, request) => {
     ws.isAlive = true;
   });
 
-  ws.on("message", (data) => {
+  ws.on("message", async (data) => {
     try {
       const message: IncomingWSMessage = JSON.parse(data.toString());
 
       switch (message.type) {
         case "subscribe": {
-          const session = getOrCreateSession(message.chatId, message.chatId);
+          const session = await getOrCreateSession(message.chatId, actorId, message.chatId);
           session.subscribe(ws);
           console.log(`[WebSocket] Client subscribed to chat ${message.chatId}`);
 
           // Send existing messages
-          const messages = chatStore.getMessages(message.chatId);
+          const messages = useMemory
+            ? await (store as any).getMessages(actorId, message.chatId)
+            : (store as any).getMessages(message.chatId);
           ws.send(JSON.stringify({
             type: "history",
             messages,
@@ -230,9 +282,9 @@ wss.on("connection", (ws: WSClient, request) => {
         case "chat": {
           // Use sessionId from message if provided, otherwise use chatId
           const sessionId = (message as any).sessionId || message.chatId;
-          const session = getOrCreateSession(message.chatId, sessionId);
+          const session = await getOrCreateSession(message.chatId, actorId, sessionId);
           session.subscribe(ws);
-          session.sendMessage(message.content);
+          await session.sendMessage(message.content);
           break;
         }
 

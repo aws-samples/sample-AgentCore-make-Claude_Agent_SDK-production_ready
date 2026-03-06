@@ -84,6 +84,35 @@ if [ "$1" = "--destroy" ]; then
     fi
     echo ""
 
+    # 1b. Delete AgentCore Memory resource
+    echo -e "${YELLOW}[1b/4] Deleting AgentCore Memory resource...${NC}"
+    # Try to read memory ID from yaml config
+    PYTHON_CMD_DESTROY=""
+    for cmd in python3 python; do
+        if command -v "$cmd" &> /dev/null; then PYTHON_CMD_DESTROY="$cmd"; break; fi
+    done
+    MEMORY_ID=""
+    if [ -n "$PYTHON_CMD_DESTROY" ] && [ -f ".bedrock_agentcore.yaml" ]; then
+        MEMORY_ID=$($PYTHON_CMD_DESTROY -c "
+import yaml
+try:
+    with open('.bedrock_agentcore.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    mid = config['agents']['$AGENT_NAME'].get('memory', {}).get('memory_id', '')
+    print(mid if mid else '')
+except:
+    print('')
+" 2>/dev/null)
+    fi
+    if [ -n "$MEMORY_ID" ]; then
+        agentcore memory delete "$MEMORY_ID" --region "$AWS_REGION" --wait 2>/dev/null || \
+            echo -e "${YELLOW}  (Memory deletion failed or already deleted)${NC}"
+        echo -e "${GREEN}  ✓ Memory resource deleted${NC}"
+    else
+        echo -e "${YELLOW}  (Memory resource not found, skipping)${NC}"
+    fi
+    echo ""
+
     # 2. Destroy AgentCore runtime
     echo -e "${YELLOW}[2/4] Destroying AgentCore runtime...${NC}"
     if command -v agentcore &>/dev/null && [ -f ".bedrock_agentcore.yaml" ]; then
@@ -293,6 +322,78 @@ echo -e "${GREEN}✓ OAuth authorizer configured${NC}"
 echo ""
 
 # ──────────────────────────────────────────────
+# Step 3b: Create AgentCore Memory resource (with LTM semantic strategy)
+#   Uses the AgentCore Starter Toolkit CLI (agentcore memory create).
+#   Events expire after 90 days. The Memory ID is passed to the container
+#   as AGENTCORE_MEMORY_ID. The --strategies flag enables LTM extraction.
+# ──────────────────────────────────────────────
+echo -e "${YELLOW}Step 3b: Creating AgentCore Memory resource...${NC}"
+
+MEMORY_NAME="${AGENT_NAME}_mem"
+
+# Read memory_id from .bedrock_agentcore.yaml if it already exists
+EXISTING_MEMORY_ID=$($PYTHON_CMD -c "
+import yaml
+try:
+    with open('.bedrock_agentcore.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    mid = config['agents']['$AGENT_NAME'].get('memory', {}).get('memory_id', '')
+    print(mid if mid else '')
+except:
+    print('')
+" 2>/dev/null)
+
+if [ -n "$EXISTING_MEMORY_ID" ]; then
+    # Verify it still exists and is active
+    if agentcore memory get "$EXISTING_MEMORY_ID" --region "$AWS_REGION" 2>&1 | grep -q "ACTIVE"; then
+        AGENTCORE_MEMORY_ID="$EXISTING_MEMORY_ID"
+        echo "  Memory resource already exists: $AGENTCORE_MEMORY_ID"
+    else
+        echo "  Previous memory not found or not active, creating new one..."
+        EXISTING_MEMORY_ID=""
+    fi
+fi
+
+if [ -z "$EXISTING_MEMORY_ID" ]; then
+    # Create memory with semantic extraction strategy for LTM
+    CREATE_OUTPUT=$(agentcore memory create "$MEMORY_NAME" \
+        --region "$AWS_REGION" \
+        --event-expiry-days 90 \
+        --strategies '[{"semanticMemoryStrategy": {"name": "semantic", "description": "Extract key facts and information from conversations"}}]' \
+        --wait 2>&1) || {
+        echo -e "${YELLOW}  Warning: Could not create memory resource. Falling back to in-memory storage.${NC}"
+        echo "  Output: $CREATE_OUTPUT"
+        AGENTCORE_MEMORY_ID=""
+    }
+
+    # Extract the memory ID from the create output
+    if [ -z "$AGENTCORE_MEMORY_ID" ]; then
+        AGENTCORE_MEMORY_ID=$(echo "$CREATE_OUTPUT" | grep -oP 'Memory ID: \K[^\s]+' || true)
+    fi
+
+    # Also try reading from the updated yaml config
+    if [ -z "$AGENTCORE_MEMORY_ID" ]; then
+        AGENTCORE_MEMORY_ID=$($PYTHON_CMD -c "
+import yaml
+try:
+    with open('.bedrock_agentcore.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    mid = config['agents']['$AGENT_NAME'].get('memory', {}).get('memory_id', '')
+    print(mid if mid else '')
+except:
+    print('')
+" 2>/dev/null)
+    fi
+fi
+
+if [ -n "$AGENTCORE_MEMORY_ID" ]; then
+    echo -e "${GREEN}✓ Memory resource ready: $AGENTCORE_MEMORY_ID${NC}"
+else
+    echo -e "${YELLOW}  Memory resource not available — will use in-memory storage${NC}"
+fi
+echo ""
+
+# ──────────────────────────────────────────────
 # Step 4: Deploy to AgentCore Runtime via CodeBuild
 #   - CodeBuild builds an ARM64 container remotely (no local Docker needed)
 #   - Base image uses public.ecr.aws to avoid Docker Hub rate limiting
@@ -304,12 +405,19 @@ echo -e "${YELLOW}Step 4: Deploying to AgentCore Runtime (via CodeBuild)...${NC}
 echo "This will build an ARM64 container in the cloud and deploy it."
 echo ""
 
+DEPLOY_ENV_FLAGS=(
+    --env "AWS_REGION=$AWS_REGION"
+    --env "PORT=8080"
+    --env "CLAUDE_CODE_USE_BEDROCK=1"
+    --env "ANTHROPIC_MODEL=us.anthropic.claude-sonnet-4-20250514-v1:0"
+)
+if [ -n "$AGENTCORE_MEMORY_ID" ]; then
+    DEPLOY_ENV_FLAGS+=(--env "AGENTCORE_MEMORY_ID=$AGENTCORE_MEMORY_ID")
+fi
+
 agentcore deploy \
     --auto-update-on-conflict \
-    --env "AWS_REGION=$AWS_REGION" \
-    --env "PORT=8080" \
-    --env "CLAUDE_CODE_USE_BEDROCK=1" \
-    --env "ANTHROPIC_MODEL=us.anthropic.claude-sonnet-4-20250514-v1:0"
+    "${DEPLOY_ENV_FLAGS[@]}"
 
 echo ""
 echo -e "${GREEN}✓ Deployment complete!${NC}"
@@ -332,6 +440,7 @@ cat > .env <<EOF
 AGENT_ARN=$AGENT_ARN
 AWS_REGION=$AWS_REGION
 PROXY_PORT=3001
+AGENTCORE_MEMORY_ID=$AGENTCORE_MEMORY_ID
 EOF
 
 # Frontend .env (Vite variables)
@@ -466,7 +575,10 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}Deployment Summary${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
-echo -e "${GREEN}Agent ARN:${NC}  $AGENT_ARN"
+echo -e "${GREEN}Agent ARN:${NC}   $AGENT_ARN"
+if [ -n "$AGENTCORE_MEMORY_ID" ]; then
+    echo -e "${GREEN}Memory ID:${NC}   $AGENTCORE_MEMORY_ID"
+fi
 echo -e "${GREEN}Proxy:${NC}      http://localhost:3001 (REST + WebSocket → AgentCore)"
 echo -e "${GREEN}CloudFront:${NC} $CF_URL"
 echo ""
