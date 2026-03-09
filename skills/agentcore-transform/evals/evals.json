@@ -1,0 +1,86 @@
+{
+  "skill_name": "agentcore-transform",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Deploy my Claude Agent SDK chat app to AgentCore",
+      "expected_output": "Skill runs Phase 1 (Analysis), detects language, SDK, framework, store, and presents analysis report before proceeding.",
+      "expectations": [
+        "Detects Claude Agent SDK import in the project",
+        "Identifies the web framework (Express, FastAPI, etc.)",
+        "Maps the conversation store type (in-memory, DB, etc.)",
+        "Identifies WebSocket or SSE setup",
+        "Presents analysis report and asks for confirmation before Phase 2"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Add AgentCore Memory to my agent for persistent conversation storage",
+      "expected_output": "Skill generates memory-client, memory-store, store router, and modifies session module to inject STM history + LTM context.",
+      "expectations": [
+        "Creates memory-client module with STM and LTM helpers",
+        "Creates memory-store module matching the original store interface",
+        "Creates store router with AGENTCORE_MEMORY_ID feature flag",
+        "Modifies session/agent module to load bounded STM history",
+        "Modifies session/agent module to search LTM for cross-session context",
+        "Adds @aws-sdk/client-bedrock-agentcore dependency"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I want to migrate my Python FastAPI chat agent to AWS AgentCore",
+      "expected_output": "Skill detects Python/FastAPI, generates Python-specific templates for all AgentCore components.",
+      "expectations": [
+        "Detects Python language and FastAPI framework",
+        "Generates runtime_server.py with FastAPI patterns",
+        "Generates memory_client.py using boto3",
+        "Generates auth.py with JWT decoding",
+        "Generates deploy.sh with pip-based dependency installation",
+        "Adds boto3 to requirements.txt"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Generate a deployment script for my AgentCore app",
+      "expected_output": "Generates a complete deploy.sh with all AgentCore setup steps and --destroy support.",
+      "expectations": [
+        "Script includes prerequisites check",
+        "Script includes agentcore configure step",
+        "Script includes Cognito setup",
+        "Script includes JWT authorizer configuration",
+        "Script includes Memory resource creation with semantic strategy",
+        "Script includes agentcore deploy with environment variables",
+        "Script includes .env file generation",
+        "Script supports --destroy flag for teardown",
+        "If frontend detected, includes S3 + CloudFront deployment"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Transform my chat app to use AgentCore and generate tests",
+      "expected_output": "After transformation, generates tests/agentcore-test.sh with auth, CRUD, WebSocket, and Memory verification tests.",
+      "expectations": [
+        "Test script authenticates via Cognito",
+        "Test script creates and lists chats via /invocations",
+        "Test script verifies unauthenticated requests are rejected",
+        "Test script tests WebSocket connectivity (if websocat available)",
+        "Test script verifies Memory resource is active",
+        "Test script cleans up test data",
+        "Test script prints pass/fail summary",
+        "Test script supports --endpoint flag for different targets"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Deploy to AgentCore but skip the frontend deployment",
+      "expected_output": "Skill respects user's request to skip frontend, generates backend-only deployment.",
+      "expectations": [
+        "Asks for confirmation in Phase 2 plan",
+        "Skips CloudFormation template generation",
+        "Skips CloudFront Function generation",
+        "deploy.sh has HAS_FRONTEND=false",
+        "No S3 sync or CloudFront invalidation steps"
+      ]
+    }
+  ]
+}
