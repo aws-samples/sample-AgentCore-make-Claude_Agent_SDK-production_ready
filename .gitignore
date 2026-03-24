@@ -3,10 +3,13 @@ node_modules/
 package-lock.json
 .pnp
 .pnp.js
+venv/
+.venv/
 
 # Testing
 coverage/
 *.lcov
+evals/
 SOLUTION_PLAN.md
 ARCHITECTURE_ORIGINAL.md
 
