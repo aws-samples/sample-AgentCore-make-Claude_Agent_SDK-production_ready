@@ -47,55 +47,20 @@ These get mangled by shell expansion if not quoted correctly.
 
 ## 3. Dockerfile Pitfalls
 
-### OpenTelemetry auto-instrumentation crash
-The `agentcore configure` auto-generates a Dockerfile that may include:
-```dockerfile
-CMD ["node", "--require", "@opentelemetry/auto-instrumentations-node/register", "dist/server/runtime-server.js"]
-```
-
-This crashes if:
-- The OTel package isn't installed
-- The project uses `tsx` (not compiled JS), so `dist/` doesn't exist
-
-### The auto-generated Dockerfile is wrong for tsx projects (CRITICAL)
-The generated Dockerfile has THREE problems for tsx-based TypeScript projects:
-1. `npm run build` — runs `vite build` which builds the **frontend** only, not the server
-2. `npm prune --production` — removes devDependencies including `tsx`, breaking the server
-3. `CMD ["node", "dist/server/runtime-server.js"]` — the compiled file doesn't exist
-
-**Fix:** Do NOT manually edit the Dockerfile (it gets regenerated on each deploy).
-Instead, add a **Dockerfile patch step** in `deploy.sh` after `agentcore configure`:
-
-```bash
-# Patch the auto-generated Dockerfile for tsx projects
-DOCKERFILE_PATH=".bedrock_agentcore/${AGENT_NAME}/Dockerfile"
-if [ -f "$DOCKERFILE_PATH" ]; then
-    $PYTHON_CMD << 'DFPATCH'
-import re
-with open("DOCKERFILE_PATH_HERE", "r") as f:
-    content = f.read()
-# Remove npm run build (vite build is frontend-only)
-content = re.sub(r'\n# Build TypeScript\nRUN npm run build\n', '\n', content)
-# Remove npm prune --production (tsx is needed at runtime)
-content = re.sub(r'\n# Prune dev dependencies.*\nRUN npm prune --production\nENV NODE_ENV=production\n', '\n', content)
-# Replace CMD to use tsx directly
-content = re.sub(r'CMD \[.*\]', 'CMD ["npx", "tsx", "server/runtime-server.ts"]', content)
-with open("DOCKERFILE_PATH_HERE", "w") as f:
-    f.write(content)
-DFPATCH
-fi
-```
-
-Also add `@opentelemetry/auto-instrumentations-node` to `package.json` **dependencies**
-(not devDependencies) so it survives in the container even if prune happens.
+### Container build with new CLI (v0.8+)
+The new `@aws/agentcore` CLI uses CDK-based deployment. For BYO Container agents,
+the CLI manages the Dockerfile. If you need to customize the container build:
+- Use `agentcore add agent --type byo --build Container` to register the agent
+- The CDK stack handles container build and deployment
+- For tsx projects, ensure the entrypoint uses `npx tsx` in the runtime
 
 ### COPY context
-The Dockerfile uses `COPY . .` which copies the entire project. Ensure
-`.dockerignore` or the agentcore dockerignore template excludes:
+For Container builds, ensure `.dockerignore` excludes:
 - `node_modules/` (rebuilt in container)
 - `.env` files
 - `.git/`
 - `dist/` (if building from source)
+- `agentcore/cdk/` (CDK infrastructure, not needed in container)
 
 ## 4. Frontend Production Routing (CRITICAL)
 
@@ -253,10 +218,9 @@ user which Bedrock model they want. Default to Sonnet for cost efficiency.
 
 ## 7. Deploy Script Best Practices
 
-### Always use `--auto-update-on-conflict`
-Redeployments may conflict with existing agent config. The flag auto-resolves:
+### Use `--yes` for non-interactive CDK deployment
 ```bash
-$AGENTCORE_CMD deploy --auto-update-on-conflict "${DEPLOY_ENV_FLAGS[@]}"
+agentcore deploy --yes
 ```
 
 ### Frontend env files must be generated BEFORE build
@@ -284,19 +248,13 @@ else
 fi
 ```
 
-### `agentcore memory delete --wait` hang (CRITICAL)
-`agentcore memory delete --wait` hangs **indefinitely** if the memory resource
-is already deleted, in a DELETING state, or doesn't exist. The `--wait` flag
-polls forever with no timeout.
-
-**Fix:** Don't use `--wait`. Check if the resource exists first, then delete async:
+### Teardown with new CLI
+The new CLI uses CDK for infrastructure. Teardown is:
 ```bash
-if $AGENTCORE_CMD memory get "$MEMORY_ID" --region "$AWS_REGION" 2>&1 | grep -q "ACTIVE\|CREATING\|DELETING"; then
-    $AGENTCORE_CMD memory delete "$MEMORY_ID" --region "$AWS_REGION" 2>/dev/null || true
-    echo "Memory delete initiated (async)"
-else
-    echo "(Memory already deleted or not found)"
-fi
+# CDK destroy removes runtime + memory
+cd agentcore/cdk && npx cdk destroy --force && cd ../..
+# Clean up Cognito via AWS CLI (new CLI has no identity cleanup command)
+aws cognito-idp delete-user-pool --user-pool-id "$POOL_ID" --region "$AWS_REGION"
 ```
 
 ### Summary should include login instructions
@@ -390,8 +348,9 @@ aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --regio
 Before running `deploy.sh`, verify:
 
 - [ ] Agent name uses underscores (no hyphens)
-- [ ] `deploy.sh` patches the auto-generated Dockerfile for tsx projects (remove build/prune, use `npx tsx`)
-- [ ] `@opentelemetry/auto-instrumentations-node` added to `package.json` dependencies
+- [ ] `@aws/agentcore` CLI installed (`npm install -g @aws/agentcore`)
+- [ ] `agentcore/agentcore.json` configured with runtime, memory, and JWT authorizer
+- [ ] `agentcore/aws-targets.json` has deployment target with account + region
 - [ ] Frontend detects production mode via `HAS_COGNITO` pattern
 - [ ] Frontend API paths include `/api` prefix (e.g., `/api/chats`, not `/chats`)
 - [ ] Frontend includes Cognito login form
@@ -401,8 +360,7 @@ Before running `deploy.sh`, verify:
 - [ ] Model prefix is dynamically resolved from region
 - [ ] `deploy.sh` uses `sed` not `grep -P` for portability
 - [ ] `deploy.sh` CloudFormation update-stack checks output before `wait` (no hang)
-- [ ] `deploy.sh` prints timing hints before ALL long-running waits (memory, deploy, CloudFront)
-- [ ] `deploy.sh --destroy` does NOT use `memory delete --wait` (hangs indefinitely)
+- [ ] `deploy.sh` prints timing hints before ALL long-running waits
 - [ ] Test script uses Python for Cognito auth (not shell `aws` with password)
 - [ ] Test script uses Bearer-only auth (no SigV4) with `?qualifier=DEFAULT`
 - [ ] `.env.production` is generated before `npm run build`

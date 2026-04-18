@@ -1,6 +1,7 @@
 # Template: deploy.sh
 
-Complete one-click deployment script for AgentCore.
+Complete one-click deployment script for AgentCore using the `@aws/agentcore`
+npm CLI (v0.8+) with CDK-based deployment.
 
 This template should be filled in based on the analysis phase results.
 Replace all `{{PLACEHOLDER}}` values with project-specific values.
@@ -19,8 +20,8 @@ See `references/deploy-script.md` for detailed documentation of each section.
 #
 # Prerequisites:
 #   - AWS CLI configured with credentials
-#   - Python 3.10+ (for AgentCore Starter Toolkit)
-#   - {{LANG_PREREQS}}
+#   - Node.js 20+ and npm
+#   - @aws/agentcore CLI (installed automatically if missing)
 
 set -e
 
@@ -36,8 +37,15 @@ AWS_REGION="us-east-1"
 AGENT_NAME="{{AGENT_NAME}}"
 STACK_NAME="{{STACK_NAME}}-frontend"
 ENTRYPOINT="{{ENTRYPOINT}}"
-LANGUAGE="{{LANGUAGE}}"
+LANGUAGE="{{LANGUAGE}}"               # "TypeScript" or "Python"
+BUILD_TYPE="{{BUILD_TYPE}}"           # "Container" or "CodeZip"
 HAS_FRONTEND={{HAS_FRONTEND}}
+
+# Helper: find python3 for JSON parsing
+PYTHON_CMD=""
+for cmd in python3 python; do
+    if command -v "$cmd" &>/dev/null; then PYTHON_CMD="$cmd"; break; fi
+done
 
 # ──────────────────────────────────────────────
 # --destroy: Tear down all resources
@@ -51,9 +59,8 @@ if [ "$1" = "--destroy" ]; then
     if [ "$HAS_FRONTEND" = true ]; then
         echo "  - CloudFront distribution + S3 bucket"
     fi
-    echo "  - AgentCore runtime (agent: $AGENT_NAME)"
-    echo "  - AgentCore Memory resource"
-    echo "  - Cognito User Pools"
+    echo "  - AgentCore CDK stack (runtime + memory)"
+    echo "  - Cognito User Pool"
     echo "  - Local config files"
     echo ""
     read -p "Are you sure? (y/N) " -n 1 -r
@@ -62,7 +69,7 @@ if [ "$1" = "--destroy" ]; then
 
     # 1. Delete CloudFormation stack (if frontend)
     if [ "$HAS_FRONTEND" = true ]; then
-        echo -e "${YELLOW}[1/5] Deleting CloudFormation stack...${NC}"
+        echo -e "${YELLOW}[1/4] Deleting CloudFormation stack...${NC}"
         if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" &>/dev/null; then
             BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" \
                 --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text 2>/dev/null) || true
@@ -77,61 +84,38 @@ if [ "$1" = "--destroy" ]; then
         fi
     fi
 
-    # 2. Delete Memory resource
-    echo -e "${YELLOW}[2/5] Deleting AgentCore Memory...${NC}"
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then
-        PYTHON_CMD="$SCRIPT_DIR/.venv/bin/python3"
+    # 2. Destroy AgentCore CDK stack
+    echo -e "${YELLOW}[2/4] Destroying AgentCore CDK stack...${NC}"
+    if [ -d "agentcore/cdk" ]; then
+        cd agentcore/cdk
+        npm install --quiet 2>/dev/null || true
+        npx cdk destroy --force 2>/dev/null || true
+        cd ../..
+        echo -e "${GREEN}  CDK stack destroyed${NC}"
     else
-        PYTHON_CMD=$(command -v python3 || command -v python)
+        echo -e "${YELLOW}  (No CDK config found)${NC}"
     fi
-    if [ -x "$SCRIPT_DIR/.venv/bin/agentcore" ]; then
-        AGENTCORE_CMD="$SCRIPT_DIR/.venv/bin/agentcore"
-    else
-        AGENTCORE_CMD="agentcore"
-    fi
-    MEMORY_ID=$($PYTHON_CMD -c "
-import yaml
-try:
-    with open('.bedrock_agentcore.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    mid = config['agents']['$AGENT_NAME'].get('memory', {}).get('memory_id', '')
-    print(mid if mid else '')
-except: print('')
-" 2>/dev/null)
-    if [ -n "$MEMORY_ID" ]; then
-        # Check if memory still exists before attempting delete
-        # CRITICAL: Do NOT use --wait (hangs indefinitely if resource is already deleting or gone)
-        if $AGENTCORE_CMD memory get "$MEMORY_ID" --region "$AWS_REGION" 2>&1 | grep -q "ACTIVE\|CREATING\|DELETING"; then
-            $AGENTCORE_CMD memory delete "$MEMORY_ID" --region "$AWS_REGION" 2>/dev/null || true
-            echo -e "${GREEN}  Memory delete initiated (async)${NC}"
-        else
-            echo -e "${YELLOW}  (Memory already deleted or not found)${NC}"
+
+    # 3. Clean up Cognito
+    echo -e "${YELLOW}[3/4] Cleaning up Cognito...${NC}"
+    if [ -f ".agentcore_cognito.json" ] && [ -n "$PYTHON_CMD" ]; then
+        POOL_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d.get('pool_id',''))" 2>/dev/null)
+        if [ -n "$POOL_ID" ]; then
+            DOMAIN=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d.get('domain',''))" 2>/dev/null)
+            [ -n "$DOMAIN" ] && aws cognito-idp delete-user-pool-domain --user-pool-id "$POOL_ID" --domain "$DOMAIN" --region "$AWS_REGION" 2>/dev/null || true
+            aws cognito-idp delete-user-pool --user-pool-id "$POOL_ID" --region "$AWS_REGION" 2>/dev/null || true
+            echo -e "${GREEN}  Cognito cleaned up${NC}"
         fi
     else
-        echo -e "${YELLOW}  (Not found)${NC}"
+        echo -e "${YELLOW}  (No Cognito config found)${NC}"
     fi
 
-    # 3. Destroy AgentCore runtime
-    echo -e "${YELLOW}[3/5] Destroying AgentCore runtime...${NC}"
-    if [ -f ".bedrock_agentcore.yaml" ]; then
-        $AGENTCORE_CMD destroy --yes 2>/dev/null || $AGENTCORE_CMD destroy 2>/dev/null || true
-        echo -e "${GREEN}  Runtime destroyed${NC}"
-    fi
-
-    # 4. Cleanup Cognito
-    echo -e "${YELLOW}[4/5] Cleaning up Cognito...${NC}"
-    if [ -f ".agentcore_identity_cognito_user.json" ]; then
-        $AGENTCORE_CMD identity cleanup-cognito --region "$AWS_REGION" 2>/dev/null || true
-        echo -e "${GREEN}  Cognito cleaned up${NC}"
-    fi
-
-    # 5. Remove local files
-    echo -e "${YELLOW}[5/5] Removing config files...${NC}"
-    rm -f .env .bedrock_agentcore.yaml .agentcore_identity_cognito_user.json
+    # 4. Remove local files
+    echo -e "${YELLOW}[4/4] Removing config files...${NC}"
+    rm -f .env .agentcore_cognito.json
+    rm -rf agentcore/ dist/
     # ADAPT: remove framework-specific env files
     # rm -f client/.env client/.env.production
-    # rm -rf dist/
     echo -e "${GREEN}  Done${NC}"
 
     echo -e "\n${GREEN}All resources destroyed.${NC}"
@@ -148,43 +132,9 @@ echo ""
 # ──────────────────────────────────────────────
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 command -v aws &>/dev/null || { echo -e "${RED}Error: AWS CLI not installed${NC}"; exit 1; }
-
-# ADAPT: language-specific checks
-# TypeScript:
-# command -v npm &>/dev/null || { echo -e "${RED}Error: npm not installed${NC}"; exit 1; }
-# Python:
-# command -v pip3 &>/dev/null || { echo -e "${RED}Error: pip not installed${NC}"; exit 1; }
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Prefer .venv Python (has boto3, pyyaml, and agentcore toolkit)
-# ADAPT: Change .venv path if the user's project uses a different venv location
-PYTHON_CMD=""
-if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then
-    PYTHON_CMD="$SCRIPT_DIR/.venv/bin/python3"
-else
-    for cmd in python3 python; do
-        if command -v "$cmd" &>/dev/null; then
-            PY_MAJOR=$("$cmd" -c "import sys; print(sys.version_info.major)" 2>/dev/null)
-            PY_MINOR=$("$cmd" -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
-            if [ "$PY_MAJOR" -ge 3 ] && [ "$PY_MINOR" -ge 10 ]; then
-                PYTHON_CMD="$cmd"; break
-            fi
-        fi
-    done
-fi
-[ -z "$PYTHON_CMD" ] && { echo -e "${RED}Error: Python 3.10+ required${NC}"; exit 1; }
-
-# Prefer .venv agentcore CLI
-if [ -x "$SCRIPT_DIR/.venv/bin/agentcore" ]; then
-    AGENTCORE_CMD="$SCRIPT_DIR/.venv/bin/agentcore"
-elif command -v agentcore &>/dev/null; then
-    AGENTCORE_CMD="agentcore"
-else
-    AGENTCORE_CMD=""
-fi
-
-echo -e "${GREEN}Prerequisites OK (python: $PYTHON_CMD)${NC}\n"
+command -v npm &>/dev/null || { echo -e "${RED}Error: npm not installed${NC}"; exit 1; }
+command -v node &>/dev/null || { echo -e "${RED}Error: Node.js not installed${NC}"; exit 1; }
+echo -e "${GREEN}Prerequisites OK${NC}\n"
 
 # ──────────────────────────────────────────────
 # AWS Credentials
@@ -202,188 +152,210 @@ echo -e "${YELLOW}Installing dependencies...${NC}"
 echo -e "${GREEN}Dependencies installed${NC}\n"
 
 # ──────────────────────────────────────────────
-# AgentCore Toolkit
+# AgentCore CLI
 # ──────────────────────────────────────────────
-echo -e "${YELLOW}Installing AgentCore Toolkit...${NC}"
-if [ -z "$AGENTCORE_CMD" ]; then
-    # Create venv if needed and install toolkit
-    if [ ! -d "$SCRIPT_DIR/.venv" ]; then
-        $PYTHON_CMD -m venv "$SCRIPT_DIR/.venv"
-        PYTHON_CMD="$SCRIPT_DIR/.venv/bin/python3"
-    fi
-    $PYTHON_CMD -m pip install --upgrade bedrock-agentcore-starter-toolkit boto3 pyyaml
-    AGENTCORE_CMD="$SCRIPT_DIR/.venv/bin/agentcore"
+echo -e "${YELLOW}Installing AgentCore CLI...${NC}"
+if ! command -v agentcore &>/dev/null; then
+    npm install -g @aws/agentcore
 fi
-echo -e "${GREEN}Toolkit ready ($AGENTCORE_CMD)${NC}\n"
+echo -e "${GREEN}AgentCore CLI $(agentcore --version)${NC}\n"
 
 # ──────────────────────────────────────────────
-# Step 1: Configure AgentCore
+# Step 1: Initialize AgentCore project
 # ──────────────────────────────────────────────
-echo -e "${YELLOW}Step 1: Configuring AgentCore Runtime...${NC}"
-if [ ! -f ".bedrock_agentcore.yaml" ]; then
-    $AGENTCORE_CMD configure \
-        --entrypoint "$ENTRYPOINT" \
+echo -e "${YELLOW}Step 1: Initializing AgentCore project...${NC}"
+if [ ! -f "agentcore/agentcore.json" ]; then
+    agentcore create \
         --name "$AGENT_NAME" \
-        --region "$AWS_REGION" \
+        --no-agent \
+        --output-dir . \
+        --skip-git \
+        --skip-install
+
+    agentcore add agent \
+        --name "$AGENT_NAME" \
+        --type byo \
+        --build "$BUILD_TYPE" \
         --language "$LANGUAGE" \
-        --deployment-type container \
+        --entrypoint "$ENTRYPOINT" \
+        --code-location . \
         --protocol HTTP \
-        --non-interactive
-
-    $PYTHON_CMD -c "
-import yaml
-with open('.bedrock_agentcore.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-config['agents']['$AGENT_NAME']['aws']['region'] = '$AWS_REGION'
-with open('.bedrock_agentcore.yaml', 'w') as f:
-    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-"
+        --network-mode PUBLIC
 fi
-echo -e "${GREEN}AgentCore configured${NC}"
 
-# CRITICAL: Patch the auto-generated Dockerfile for tsx projects
-# The default Dockerfile has: npm run build -> npm prune --production -> node dist/...
-# This fails because: (1) vite build only builds frontend, not server TS
-# (2) prune removes tsx which is needed at runtime
-# (3) OTel --require is injected but package may not survive prune
-DOCKERFILE_PATH=".bedrock_agentcore/${AGENT_NAME}/Dockerfile"
-if [ -f "$DOCKERFILE_PATH" ]; then
-    echo -e "${YELLOW}  Patching Dockerfile for tsx runtime...${NC}"
-    $PYTHON_CMD << DFPATCH
-import re
-with open("$DOCKERFILE_PATH", "r") as f:
-    content = f.read()
-# Remove npm run build (vite build is frontend-only)
-content = re.sub(r'\n# Build TypeScript\nRUN npm run build\n', '\n', content)
-# Remove npm prune --production (tsx is a devDependency we need at runtime)
-content = re.sub(r'\n# Prune dev dependencies and set production mode\nRUN npm prune --production\nENV NODE_ENV=production\n', '\n', content)
-# Replace CMD to use tsx directly
-content = re.sub(r'CMD \[.*\]', 'CMD ["npx", "tsx", "server/runtime-server.ts"]', content)
-with open("$DOCKERFILE_PATH", "w") as f:
-    f.write(content)
-print("  Dockerfile patched: uses npx tsx, no build/prune steps")
-DFPATCH
+# Configure deployment target
+if [ -n "$PYTHON_CMD" ]; then
+    $PYTHON_CMD << PYEOF
+import json
+targets_path = "agentcore/aws-targets.json"
+try:
+    with open(targets_path) as f: targets = json.load(f)
+except: targets = []
+has_default = any(t.get("name") == "default" for t in targets)
+if not has_default:
+    targets.append({"name": "default", "account": "$AWS_ACCOUNT_ID", "region": "$AWS_REGION"})
+    with open(targets_path, "w") as f: json.dump(targets, f, indent=2)
+PYEOF
+else
+    cat > agentcore/aws-targets.json << EOF
+[{"name": "default", "account": "$AWS_ACCOUNT_ID", "region": "$AWS_REGION"}]
+EOF
 fi
-echo ""
+echo -e "${GREEN}AgentCore project initialized${NC}\n"
 
 # ──────────────────────────────────────────────
-# Step 2: Cognito setup
+# Step 2: Cognito setup (via AWS CLI)
 # ──────────────────────────────────────────────
 echo -e "${YELLOW}Step 2: Setting up Cognito...${NC}"
-if [ ! -f ".agentcore_identity_cognito_user.json" ]; then
-    $AGENTCORE_CMD identity setup-cognito --region "$AWS_REGION" --auth-flow user
+if [ -z "$PYTHON_CMD" ]; then
+    echo -e "${RED}Error: Python 3 required for Cognito setup${NC}"; exit 1
 fi
 
-RUNTIME_POOL_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['pool_id'])")
-RUNTIME_CLIENT_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['client_id'])")
-RUNTIME_USERNAME=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['username'])")
-RUNTIME_PASSWORD=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['password'])")
-DISCOVERY_URL="https://cognito-idp.$AWS_REGION.amazonaws.com/$RUNTIME_POOL_ID/.well-known/openid-configuration"
+if [ ! -f ".agentcore_cognito.json" ]; then
+    $PYTHON_CMD << PYEOF
+import json, subprocess, secrets, string
+
+region = "$AWS_REGION"
+pool_name = "${AGENT_NAME}-runtime"
+
+def run(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(result.stdout) if result.stdout.strip() else {}
+
+pool = run(["aws", "cognito-idp", "create-user-pool",
+    "--pool-name", pool_name,
+    "--auto-verified-attributes", "email",
+    "--schema", '[{"Name":"email","Required":true,"Mutable":true}]',
+    "--region", region, "--output", "json"])
+pool_id = pool["UserPool"]["Id"]
+
+domain = f"{pool_name.replace('_','-').lower()}-{pool_id.split('_')[1][:8].lower()}"
+run(["aws", "cognito-idp", "create-user-pool-domain",
+    "--user-pool-id", pool_id, "--domain", domain, "--region", region])
+
+client = run(["aws", "cognito-idp", "create-user-pool-client",
+    "--user-pool-id", pool_id,
+    "--client-name", f"{pool_name}-client",
+    "--explicit-auth-flows", "ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH",
+    "--region", region, "--output", "json"])
+client_id = client["UserPoolClient"]["ClientId"]
+
+username = "testuser@example.com"
+password = "Test" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12)) + "!1"
+run(["aws", "cognito-idp", "admin-create-user",
+    "--user-pool-id", pool_id, "--username", username,
+    "--user-attributes", f'Name=email,Value={username}', 'Name=email_verified,Value=true',
+    "--message-action", "SUPPRESS", "--region", region])
+run(["aws", "cognito-idp", "admin-set-user-password",
+    "--user-pool-id", pool_id, "--username", username,
+    "--password", password, "--permanent", "--region", region])
+
+discovery_url = f"https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/openid-configuration"
+config = {"pool_id": pool_id, "client_id": client_id, "domain": domain,
+          "username": username, "password": password, "discovery_url": discovery_url, "region": region}
+with open(".agentcore_cognito.json", "w") as f:
+    json.dump(config, f, indent=2)
+PYEOF
+fi
+
+RUNTIME_POOL_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['pool_id'])")
+RUNTIME_CLIENT_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['client_id'])")
+RUNTIME_USERNAME=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['username'])")
+RUNTIME_PASSWORD=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['password'])")
+DISCOVERY_URL=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['discovery_url'])")
 echo -e "${GREEN}Cognito ready (user: $RUNTIME_USERNAME)${NC}\n"
 
 # ──────────────────────────────────────────────
-# Step 3: JWT Authorizer
+# Step 3: Configure CUSTOM_JWT authorizer + memory
 # ──────────────────────────────────────────────
-echo -e "${YELLOW}Step 3: Configuring JWT authorizer...${NC}"
-$PYTHON_CMD << PYEOF
-import yaml
-with open('.bedrock_agentcore.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-agent = config['agents']['$AGENT_NAME']
-agent['authorizer_configuration'] = {
-    'customJWTAuthorizer': {
-        'allowedAudience': ['$RUNTIME_CLIENT_ID'],
-        'discoveryUrl': '$DISCOVERY_URL'
-    }
-}
-agent['request_header_configuration'] = {
-    'requestHeaderAllowlist': ['Authorization']
-}
-agent['aws']['region'] = '$AWS_REGION'
-with open('.bedrock_agentcore.yaml', 'w') as f:
-    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-PYEOF
-echo -e "${GREEN}JWT authorizer configured${NC}\n"
+echo -e "${YELLOW}Step 3: Configuring authorizer and memory...${NC}"
 
-# ──────────────────────────────────────────────
-# Step 4: Memory resource
-# ──────────────────────────────────────────────
-echo -e "${YELLOW}Step 4: Creating AgentCore Memory...${NC}"
 MEMORY_NAME="${AGENT_NAME}_mem"
-AGENTCORE_MEMORY_ID=""
 
-EXISTING_MEMORY_ID=$($PYTHON_CMD -c "
-import yaml
-try:
-    with open('.bedrock_agentcore.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    mid = config['agents']['$AGENT_NAME'].get('memory', {}).get('memory_id', '')
-    print(mid if mid else '')
-except: print('')
-" 2>/dev/null)
+$PYTHON_CMD << PYEOF
+import json
 
-if [ -n "$EXISTING_MEMORY_ID" ] && $AGENTCORE_CMD memory get "$EXISTING_MEMORY_ID" --region "$AWS_REGION" 2>&1 | grep -q "ACTIVE"; then
-    AGENTCORE_MEMORY_ID="$EXISTING_MEMORY_ID"
-    echo "  Memory already exists: $AGENTCORE_MEMORY_ID"
-else
-    echo -e "${YELLOW}  Creating memory resource (this may take 1-2 minutes)...${NC}"
-    CREATE_OUTPUT=$($AGENTCORE_CMD memory create "$MEMORY_NAME" \
-        --region "$AWS_REGION" \
-        --event-expiry-days 90 \
-        --strategies '[{"semanticMemoryStrategy": {"name": "semantic", "description": "Extract key facts and information from conversations"}}]' \
-        --wait 2>&1) || echo -e "${YELLOW}  Warning: Memory creation failed${NC}"
+with open("agentcore/agentcore.json", "r") as f:
+    config = json.load(f)
 
-    # NOTE: grep -P is not available on macOS. Use sed instead.
-    AGENTCORE_MEMORY_ID=$(echo "$CREATE_OUTPUT" | sed -n 's/.*Memory ID: \([^ ]*\).*/\1/p' || true)
-    if [ -z "$AGENTCORE_MEMORY_ID" ]; then
-        AGENTCORE_MEMORY_ID=$($PYTHON_CMD -c "
-import yaml
-try:
-    with open('.bedrock_agentcore.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    mid = config['agents']['$AGENT_NAME'].get('memory', {}).get('memory_id', '')
-    print(mid if mid else '')
-except: print('')
-" 2>/dev/null)
-    fi
+for runtime in config.get("runtimes", []):
+    if runtime.get("name") == "$AGENT_NAME":
+        runtime["authorizerType"] = "CUSTOM_JWT"
+        runtime["customJwtAuthorizer"] = {
+            "discoveryUrl": "$DISCOVERY_URL",
+            "allowedAudience": ["$RUNTIME_CLIENT_ID"]
+        }
+        runtime["requestHeaderAllowlist"] = ["Authorization"]
+        runtime["memory"] = "$MEMORY_NAME"
+        break
+
+has_memory = any(m.get("name") == "$MEMORY_NAME" for m in config.get("memories", []))
+if not has_memory:
+    config.setdefault("memories", []).append({
+        "name": "$MEMORY_NAME",
+        "strategies": ["SEMANTIC"],
+        "expiryDays": 90
+    })
+
+with open("agentcore/agentcore.json", "w") as f:
+    json.dump(config, f, indent=2)
+PYEOF
+
+echo -e "${GREEN}Authorizer and memory configured${NC}\n"
+
+# ──────────────────────────────────────────────
+# Step 4: Deploy via CDK
+# ──────────────────────────────────────────────
+echo -e "${YELLOW}Step 4: Deploying to AgentCore (via CDK)...${NC}"
+
+if [ -d "agentcore/cdk" ]; then
+    echo "  Installing CDK dependencies..."
+    cd agentcore/cdk && npm install --quiet && cd ../..
 fi
 
-[ -n "$AGENTCORE_MEMORY_ID" ] && echo -e "${GREEN}Memory ready: $AGENTCORE_MEMORY_ID${NC}" || echo -e "${YELLOW}Memory unavailable (in-memory fallback)${NC}"
-echo ""
-
-# ──────────────────────────────────────────────
-# Step 5: Deploy container
-# ──────────────────────────────────────────────
-echo -e "${YELLOW}Step 5: Deploying to AgentCore Runtime...${NC}"
-
-# Resolve Bedrock inference profile for the target region
-# CRITICAL: Direct model IDs do NOT work; must use inference profiles
-case "$AWS_REGION" in
-    us-*)  MODEL_PREFIX="us" ;;
-    ap-*)  MODEL_PREFIX="apac" ;;
-    eu-*)  MODEL_PREFIX="eu" ;;
-    *)     MODEL_PREFIX="us" ;;
-esac
-# ADAPT: Change the model to match the user's needs (sonnet, haiku, opus, etc.)
-BEDROCK_MODEL_ID="${MODEL_PREFIX}.anthropic.claude-sonnet-4-20250514-v1:0"
-
-DEPLOY_ENV_FLAGS=(
-    --env "AWS_REGION=$AWS_REGION"
-    --env "PORT=8080"
-    --env "CLAUDE_CODE_USE_BEDROCK=1"
-    --env "ANTHROPIC_MODEL=$BEDROCK_MODEL_ID"
-)
-[ -n "$AGENTCORE_MEMORY_ID" ] && DEPLOY_ENV_FLAGS+=(--env "AGENTCORE_MEMORY_ID=$AGENTCORE_MEMORY_ID")
-
-echo -e "${YELLOW}  Building and deploying container (this may take 3-5 minutes)...${NC}"
-$AGENTCORE_CMD deploy --auto-update-on-conflict "${DEPLOY_ENV_FLAGS[@]}"
+echo -e "${YELLOW}  Deploying (this may take 3-5 minutes)...${NC}"
+agentcore deploy --yes
 echo -e "${GREEN}Deployed!${NC}\n"
 
 # ──────────────────────────────────────────────
-# Step 6: Generate .env files
+# Step 5: Extract deployed info + generate .env files
 # ──────────────────────────────────────────────
-echo -e "${YELLOW}Step 6: Generating config files...${NC}"
-AGENT_ARN=$($PYTHON_CMD -c "import yaml; d=yaml.safe_load(open('.bedrock_agentcore.yaml')); print(d['agents']['$AGENT_NAME']['bedrock_agentcore']['agent_arn'])")
+echo -e "${YELLOW}Step 5: Generating config files...${NC}"
+
+AGENT_ARN=$(agentcore status --json 2>/dev/null | $PYTHON_CMD -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for r in data if isinstance(data, list) else data.get('resources', data.get('runtimes', [])):
+        if isinstance(r, dict):
+            arn = r.get('arn', r.get('runtimeArn', ''))
+            if arn: print(arn); break
+except: pass
+" 2>/dev/null)
+
+# Fallback: read from deployed-state.json
+if [ -z "$AGENT_ARN" ] && [ -f "agentcore/.cli/deployed-state.json" ]; then
+    AGENT_ARN=$($PYTHON_CMD -c "
+import json
+with open('agentcore/.cli/deployed-state.json') as f: state = json.load(f)
+for tdata in state.get('targets', {}).values():
+    for rdata in tdata.get('resources', {}).get('runtimes', {}).values():
+        arn = rdata.get('runtimeArn', rdata.get('arn', ''))
+        if arn: print(arn); break
+" 2>/dev/null)
+fi
+
+AGENTCORE_MEMORY_ID=""
+if [ -f "agentcore/.cli/deployed-state.json" ]; then
+    AGENTCORE_MEMORY_ID=$($PYTHON_CMD -c "
+import json
+with open('agentcore/.cli/deployed-state.json') as f: state = json.load(f)
+for tdata in state.get('targets', {}).values():
+    for mdata in tdata.get('resources', {}).get('memories', {}).values():
+        mid = mdata.get('memoryId', mdata.get('arn', ''))
+        if mid: print(mid); break
+" 2>/dev/null)
+fi
 
 cat > .env << EOF
 AGENT_ARN=$AGENT_ARN
@@ -395,8 +367,6 @@ EOF
 # ADAPT: Generate frontend .env files if HAS_FRONTEND=true
 # IMPORTANT: Must be generated BEFORE npm run build (Vite bakes env vars at build time)
 if [ "$HAS_FRONTEND" = true ]; then
-    # Production: empty API/WS base = use same-origin CloudFront routing
-    # HAS_COGNITO triggers /invocations mode + login form automatically
     cat > client/.env.production << EOF
 VITE_API_BASE=
 VITE_WS_BASE=
@@ -405,7 +375,6 @@ VITE_COGNITO_CLIENT_ID=$RUNTIME_CLIENT_ID
 VITE_AWS_REGION=$AWS_REGION
 EOF
 
-    # Local dev: proxy mode
     cat > client/.env << EOF
 VITE_API_BASE=http://localhost:3001
 VITE_WS_BASE=ws://localhost:3001
@@ -418,15 +387,14 @@ fi
 echo -e "${GREEN}Config files saved${NC}\n"
 
 # ──────────────────────────────────────────────
-# Step 7: Frontend deployment (if applicable)
+# Step 6: Frontend deployment (if applicable)
 # ──────────────────────────────────────────────
 if [ "$HAS_FRONTEND" = true ]; then
-    echo -e "${YELLOW}Step 7: Deploying frontend to S3 + CloudFront...${NC}"
+    echo -e "${YELLOW}Step 6: Deploying frontend to S3 + CloudFront...${NC}"
 
     ENCODED_AGENT_ARN=$($PYTHON_CMD -c "import urllib.parse; print(urllib.parse.quote('$AGENT_ARN', safe=''))")
 
     # ADAPT: Create/update CloudFormation stack
-    # See references/frontend-deployment.md for full template
     # CRITICAL: Do NOT blindly wait after update-stack — it hangs if no update is needed
     if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" &>/dev/null; then
         UPDATE_OUTPUT=$(aws cloudformation update-stack \
@@ -434,7 +402,6 @@ if [ "$HAS_FRONTEND" = true ]; then
             --template-body file://infra/template.yaml \
             --parameters ParameterKey=EncodedAgentArn,ParameterValue="$ENCODED_AGENT_ARN" ParameterKey=AwsRegion,ParameterValue="$AWS_REGION" \
             --region "$AWS_REGION" 2>&1) || true
-        # Only wait if an update was actually started (not "No updates are to be performed")
         if echo "$UPDATE_OUTPUT" | grep -q "StackId"; then
             echo -e "${YELLOW}  Waiting for stack update (CloudFront updates can take 5-15 minutes)...${NC}"
             aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
@@ -447,7 +414,7 @@ if [ "$HAS_FRONTEND" = true ]; then
             --template-body file://infra/template.yaml \
             --parameters ParameterKey=EncodedAgentArn,ParameterValue="$ENCODED_AGENT_ARN" ParameterKey=AwsRegion,ParameterValue="$AWS_REGION" \
             --region "$AWS_REGION"
-        echo -e "${YELLOW}  Creating CloudFront distribution — this typically takes 5-15 minutes. Please be patient...${NC}"
+        echo -e "${YELLOW}  Creating CloudFront distribution — this typically takes 5-15 minutes...${NC}"
         aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$AWS_REGION"
     fi
 
@@ -456,17 +423,10 @@ if [ "$HAS_FRONTEND" = true ]; then
     CF_DOMAIN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --query "Stacks[0].Outputs[?OutputKey=='DistributionDomain'].OutputValue" --output text)
     CF_URL="https://$CF_DOMAIN"
 
-    # ADAPT: Build frontend (env files must already exist from Step 6)
-    # IMPORTANT: .env.production must be generated BEFORE build — Vite bakes env vars at build time
-    # TypeScript (Vite):
+    # ADAPT: Build frontend
     npm run build
-    # Python (if applicable):
-    # python build_frontend.py
 
     # ADAPT: Sync to S3 with proper cache headers
-    # - index.html: no-cache (always fetch fresh after invalidation)
-    # - Hashed assets (JS/CSS/images): cache forever (immutable, content-addressed)
-    # ADAPT: Change "dist/" to match your build output directory (e.g., "dist/", "build/", "client/dist/")
     DIST_DIR="dist"
     aws s3 cp "$DIST_DIR/index.html" "s3://$BUCKET_NAME/index.html" \
         --cache-control "no-cache, no-store, must-revalidate" \
@@ -477,7 +437,6 @@ if [ "$HAS_FRONTEND" = true ]; then
         --cache-control "public, max-age=31536000, immutable" \
         --region "$AWS_REGION"
 
-    # Invalidate
     aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*" --region "$AWS_REGION" --output text --query "Invalidation.Id"
 
     echo -e "${GREEN}Frontend deployed: $CF_URL${NC}\n"
@@ -495,24 +454,17 @@ echo -e "${GREEN}Agent ARN:${NC}   $AGENT_ARN"
 if [ "$HAS_FRONTEND" = true ] && [ -n "$CF_URL" ]; then
     echo -e "${GREEN}CloudFront:${NC} $CF_URL"
 fi
-echo -e "${GREEN}Model:${NC}      $BEDROCK_MODEL_ID"
 echo -e "${GREEN}Region:${NC}     $AWS_REGION"
-echo ""
-echo -e "${YELLOW}Features:${NC}"
-echo "  - STM: Conversation events stored in AgentCore Memory"
-echo "  - LTM: Semantic search retrieves context from past conversations"
-echo "  - Auth: Cognito login form built into frontend"
 echo ""
 echo -e "${YELLOW}Login Credentials:${NC}"
 echo "  Username: $RUNTIME_USERNAME"
 echo "  Password: $RUNTIME_PASSWORD"
 echo ""
-echo -e "${YELLOW}Next steps:${NC}"
-if [ "$HAS_FRONTEND" = true ] && [ -n "$CF_URL" ]; then
-    echo "  1. Visit $CF_URL and sign in with the credentials above"
-fi
-echo "  2. Run ./tests/agentcore-test.sh to verify the deployment"
-echo "  3. For local dev: npm run dev:proxy (requires .env with AGENT_ARN)"
+echo -e "${YELLOW}Useful Commands:${NC}"
+echo "  agentcore status                     # Check deployment status"
+echo "  agentcore invoke \"Hello\"              # Chat with deployed agent"
+echo "  agentcore logs                       # Stream runtime logs"
+echo "  agentcore deploy --diff              # Preview changes"
 echo ""
 echo -e "${GREEN}Deployment complete!${NC}"
 ```

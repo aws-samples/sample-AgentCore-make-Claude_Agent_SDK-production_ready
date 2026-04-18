@@ -321,51 +321,35 @@ Read `references/frontend-deployment.md` for CloudFormation template.
 
 ### 4.1 deploy.sh
 
-Generate a complete `deploy.sh` that handles:
-1. Prerequisites check (AWS CLI, Python 3.10+, npm/pip, agentcore CLI).
+Generate a complete `deploy.sh` using the `@aws/agentcore` npm CLI (v0.8+):
+1. Prerequisites check (AWS CLI, Node.js 20+, npm).
 2. AWS credentials validation.
-3. Install dependencies (npm install / pip install).
-4. Install AgentCore Starter Toolkit (`pip install bedrock-agentcore-starter-toolkit`).
-5. `agentcore configure` — set up runtime config.
-5b. **Patch auto-generated Dockerfile** — for tsx projects, remove `npm run build`,
-   `npm prune --production`, and fix CMD to use `npx tsx` (see `references/lessons-learned.md` section 3).
-6. `agentcore identity setup-cognito` — create Cognito User Pools.
-7. Configure JWT authorizer in `.bedrock_agentcore.yaml`.
-8. `agentcore memory create` — create Memory resource with semantic strategy.
+3. Install dependencies (npm install).
+4. Install AgentCore CLI (`npm install -g @aws/agentcore`).
+5. `agentcore create --name $AGENT_NAME --no-agent --output-dir . --skip-git --skip-install` — initialize project.
+5b. `agentcore add agent --type byo --build Container --language TypeScript --entrypoint ... --code-location .` — register existing code as BYO agent.
+5c. Configure `agentcore/aws-targets.json` with account + region.
+6. Cognito setup via AWS CLI (create-user-pool, create-user-pool-client, admin-create-user).
+7. Configure CUSTOM_JWT authorizer in `agentcore/agentcore.json`.
+8. Add memory resource to `agentcore/agentcore.json` (strategies: SEMANTIC, expiryDays: 90).
 9. **Resolve Bedrock model ID** — determine correct inference profile for the target region.
-10. `agentcore deploy` — build & deploy container via CodeBuild **with `--env` flags**.
-11. Generate .env files with Agent ARN, Memory ID, Cognito credentials.
-12. Deploy frontend to S3 + CloudFront (if frontend exists).
+10. `agentcore deploy --yes` — CDK-based deployment.
+11. `agentcore status --json` — extract Agent ARN from deployed state.
+12. Generate .env files with Agent ARN, Memory ID, Cognito credentials.
+13. Deploy frontend to S3 + CloudFront (if frontend exists).
     **CRITICAL:** Check `update-stack` output before calling `wait` — it hangs if no update needed.
-    **CRITICAL:** Print timing hints before ALL long-running waits (memory create: 1-2 min,
-    container deploy: 3-5 min, CloudFront create/update: 5-15 min). Without these,
-    users assume the script is stuck and kill it manually, breaking the deployment.
-13. Print summary with test credentials and URLs.
-14. Support `--destroy` flag for teardown.
+14. Print summary with test credentials and URLs.
+15. Support `--destroy` flag for teardown (CDK destroy + Cognito cleanup + local file removal).
 
 Adapt the script based on:
 - Language: npm commands (TS) vs pip commands (Python).
+- Build type: Container (TS) vs CodeZip (Python).
 - Frontend: include S3/CloudFront steps only if frontend detected.
 - Agent name: derive from package.json name or project directory.
 
 **CRITICAL deploy.sh requirements (learned from production issues):**
 
-1. **Python venv handling:** During Phase 1 analysis, check if the project has an
-   existing Python virtual environment (`.venv/`, `venv/`, etc.). If found, ask the
-   user to confirm its path. The deploy.sh MUST prefer the venv's Python and agentcore
-   CLI. Store the venv path in a `$AGENTCORE_CMD` variable and use it for ALL agentcore
-   CLI calls. If no venv exists, create one and install the toolkit there. System Python
-   often lacks required packages (boto3, pyyaml).
-
-2. **Container environment variables via `--env` flags:** The Dockerfile should NOT
-   hardcode runtime configuration. Instead, deploy.sh passes env vars via
-   `agentcore deploy --env "KEY=VALUE"` flags. Required env vars:
-   - `CLAUDE_CODE_USE_BEDROCK=1` — routes Claude Agent SDK through Bedrock instead of Anthropic API
-   - `ANTHROPIC_MODEL=<inference-profile-id>` — the Bedrock inference profile ID (see below)
-   - `AGENTCORE_MEMORY_ID=<memory-id>` — enables Memory-backed storage in containers
-   - `AWS_REGION=<region>` — the target AWS region
-
-3. **Bedrock inference profile resolution:** Direct model IDs (e.g.,
+1. **Bedrock inference profile resolution:** Direct model IDs (e.g.,
    `anthropic.claude-sonnet-4-20250514-v1:0`) do NOT work for on-demand invocation.
    You MUST use an inference profile ID. The prefix depends on the AWS region:
    - `us-east-1`, `us-west-2` → `us.anthropic.claude-*`
@@ -374,7 +358,6 @@ Adapt the script based on:
    - For any region → `global.anthropic.claude-*` (works everywhere but may route cross-region)
 
    The deploy.sh should resolve the correct prefix based on `$AWS_REGION`.
-   Alternatively, run `aws bedrock list-inference-profiles` to discover available profiles.
 
    **Ask the user** which model they want to use (default: sonnet) if the original app
    uses a model name like "opus" or "sonnet" rather than a specific Bedrock ID.
@@ -428,7 +411,7 @@ The test script should:
 - Include `Accept: text/event-stream, application/json` header
 
 The script should:
-- Read configuration from `.env` and `.agentcore_identity_cognito_user.json`.
+- Read configuration from `.env` and `.agentcore_cognito.json`.
 - Use Python's `urllib.request` for REST tests (NOT curl — avoids quoting issues).
 - Support `--endpoint <url>` flag to test either local proxy or deployed endpoint.
 - Print clear pass/fail output with colors.
@@ -458,7 +441,7 @@ The script should:
 ### Security
 - Never log full JWT tokens (only first/last few characters).
 - Never commit .env files or credentials.
-- Add `.env`, `.agentcore_identity_cognito_user.json`, `.bedrock_agentcore.yaml` to .gitignore.
+- Add `.env`, `.agentcore_cognito.json`, `agentcore/.cli/`, `agentcore/cdk/cdk.out/` to .gitignore.
 - Generated auth code must handle missing/expired/malformed tokens gracefully.
 
 ---

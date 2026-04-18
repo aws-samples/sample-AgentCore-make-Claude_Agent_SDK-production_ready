@@ -2,6 +2,22 @@
 
 A demo chat application using the Claude Agent SDK with a React frontend, deployed on AWS Bedrock AgentCore Runtime. Modified from [original Anthropics Claude Agent SDK simple-chatapp demo](https://github.com/anthropics/claude-agent-sdk-demos/tree/main/simple-chatapp).
 
+> ### Featured Skill: [`ac-evaluation-transform`](./skills/ac-evaluation-transform/SKILL.md)
+>
+> Adds OpenTelemetry instrumentation (traces, structured logs, CloudWatch EMF metrics) to any
+> Claude Agent SDK agent so that **all 9 Amazon Bedrock AgentCore built-in evaluators pass with
+> zero errors** — targeting byte-level parity with Strands SDK auto-instrumentation.
+>
+> **Evaluators covered:** Helpfulness · Faithfulness · Correctness · Coherence · Conciseness ·
+> Harmfulness · InstructionFollowing · GoalSuccessRate · ToolSelectionAccuracy
+>
+> Use when adding OTEL to a new agent, fixing evaluation errors (`AgentSpanMappingException`,
+> `LogEventMissingException`), or reaching telemetry parity with Strands. The skill modifies
+> **only the instrumentation layer** — never the agent's logic, tools, or prompts.
+>
+> See also: [`agentcore-transform`](./skills/agentcore-transform/SKILL.md) — the companion skill
+> that deploys any Claude Agent SDK app to AgentCore Runtime, Memory, Identity, and CloudFront.
+
 ```mermaid
 graph LR
     subgraph client["Client"]
@@ -51,7 +67,8 @@ graph LR
 
 - Node.js 20+
 - AWS CLI configured with credentials
-- Python 3.10+ (for the AgentCore Starter Toolkit; use a virtualenv if needed)
+- Python 3.x (for JSON manipulation in deploy.sh)
+- `@aws/agentcore` CLI v0.8.2+ (installed automatically by deploy.sh via `npm install -g @aws/agentcore`)
 
 ### Deploy
 
@@ -60,11 +77,16 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-This handles everything: AgentCore Runtime setup, Cognito auth, ARM64 container build via CodeBuild (no local Docker), S3 + CloudFront frontend deployment.
+This handles everything:
+- AgentCore project init (`agentcore create` + `agentcore add agent --framework Strands --model-provider Bedrock`)
+- Cognito User Pool + test user (via AWS CLI)
+- `agentcore.json` config: CUSTOM_JWT authorizer, Memory with 4 strategies (SEMANTIC, USER_PREFERENCE, SUMMARIZATION, EPISODIC)
+- CDK-based deployment (`agentcore deploy --yes`) with automatic ContainerSourceAsset patch
+- S3 + CloudFront frontend deployment (CloudFormation)
 
 ### Access
 
-**Production** — open the CloudFront URL printed at the end of deploy (e.g. `https://d33sm1d7ly2wjz.cloudfront.net`). No local server needed.
+**Production** — open the CloudFront URL printed at the end of deploy (e.g. `https://d1joau52bm9ivp.cloudfront.net`). No local server needed.
 
 **Local dev** — for development against the deployed AgentCore backend:
 ```bash
@@ -96,7 +118,7 @@ Sign in with the test credentials printed by `deploy.sh`.
 
 4. **Bounded context window** - Resolved. Instead of injecting unbounded conversation history into the system prompt, only the last 20 STM turns + top 5 LTM records are included.
 
-5. **Authentication** - Cognito test users via `agentcore identity setup-cognito`. AgentCore validates JWTs at the platform level.
+5. **Authentication** - Cognito User Pool created via AWS CLI in deploy.sh. AgentCore validates JWTs at the platform level via CUSTOM_JWT authorizer (nested `authorizerConfiguration.customJwtAuthorizer` schema).
 
 ## Demo
 

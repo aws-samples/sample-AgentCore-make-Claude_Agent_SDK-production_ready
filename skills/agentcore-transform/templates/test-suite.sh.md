@@ -72,7 +72,7 @@ if os.path.exists(env_file):
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k, v)
 
-cognito_file = ".agentcore_identity_cognito_user.json"
+cognito_file = ".agentcore_cognito.json"
 if not os.path.exists(cognito_file):
     print(f"{RED}Error: {cognito_file} not found. Run deploy.sh first.{NC}")
     sys.exit(1)
@@ -80,10 +80,9 @@ if not os.path.exists(cognito_file):
 with open(cognito_file) as f:
     cognito = json.load(f)
 
-rt = cognito["runtime"]
-CLIENT_ID = rt["client_id"]
-USERNAME = rt["username"]
-PASSWORD = rt["password"]
+CLIENT_ID = cognito["client_id"]
+USERNAME = cognito["username"]
+PASSWORD = cognito["password"]
 # ADAPT: Change default region to match deployment
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 AGENT_ARN = os.environ.get("AGENT_ARN", "")
