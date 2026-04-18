@@ -7,9 +7,9 @@ Patterns for integrating AgentCore Identity (Cognito) authentication.
 AgentCore Identity uses Amazon Cognito for user authentication:
 
 1. **Runtime User Pool** — Validates JWTs at the AgentCore platform level.
-   The `customJWTAuthorizer` in `.bedrock_agentcore.yaml` points to this pool.
+   The `customJwtAuthorizer` in `agentcore/agentcore.json` points to this pool.
 2. **Identity User Pool** — Optional, for credential vending (not always needed).
-3. **Test Users** — Created by `agentcore identity setup-cognito` for development.
+3. **Test Users** — Created via AWS CLI in deploy.sh for development.
 
 The container itself does NOT need to verify tokens (AgentCore does that),
 but it decodes them to extract user identity (`actorId`).
@@ -187,25 +187,28 @@ const data = await response.json();
 const token = data.AuthenticationResult.IdToken;
 ```
 
-## .bedrock_agentcore.yaml Configuration
+## agentcore.json Configuration
 
-The JWT authorizer is configured in the AgentCore YAML config:
+The JWT authorizer is configured in `agentcore/agentcore.json` on the runtime object:
 
-```yaml
-agents:
-  my_agent:
-    authorizer_configuration:
-      customJWTAuthorizer:
-        allowedAudience:
-          - "<COGNITO_CLIENT_ID>"
-        discoveryUrl: "https://cognito-idp.<REGION>.amazonaws.com/<POOL_ID>/.well-known/openid-configuration"
-    request_header_configuration:
-      requestHeaderAllowlist:
-        - "Authorization"
+```json
+{
+  "runtimes": [
+    {
+      "name": "my_agent",
+      "authorizerType": "CUSTOM_JWT",
+      "customJwtAuthorizer": {
+        "discoveryUrl": "https://cognito-idp.<REGION>.amazonaws.com/<POOL_ID>/.well-known/openid-configuration",
+        "allowedAudience": ["<COGNITO_CLIENT_ID>"]
+      },
+      "requestHeaderAllowlist": ["Authorization"]
+    }
+  ]
+}
 ```
 
 Key notes:
-- `allowedAudience` (singular, not plural) is an array of client IDs.
+- `allowedAudience` is an array of client IDs.
 - `discoveryUrl` points to the OIDC discovery endpoint.
 - `requestHeaderAllowlist` must include `Authorization` for the token to reach the container.
 

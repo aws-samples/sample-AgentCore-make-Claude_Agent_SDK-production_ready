@@ -34,18 +34,18 @@ if [ -f ".env" ]; then
   export $(grep -v '^#' .env | xargs)
 fi
 
-if [ ! -f ".agentcore_identity_cognito_user.json" ]; then
-  echo -e "${RED}Error: .agentcore_identity_cognito_user.json not found${NC}"
+if [ ! -f ".agentcore_cognito.json" ]; then
+  echo -e "${RED}Error: .agentcore_cognito.json not found${NC}"
   echo "Run deploy.sh first."
   exit 1
 fi
 
 # Parse Cognito credentials
 PYTHON_CMD=$(command -v python3 || command -v python)
-POOL_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['pool_id'])")
-CLIENT_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['client_id'])")
-USERNAME=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['username'])")
-PASSWORD=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_identity_cognito_user.json')); print(d['runtime']['password'])")
+POOL_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['pool_id'])")
+CLIENT_ID=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['client_id'])")
+USERNAME=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['username'])")
+PASSWORD=$($PYTHON_CMD -c "import json; d=json.load(open('.agentcore_cognito.json')); print(d['password'])")
 REGION=${AWS_REGION:-us-east-1}
 
 # Support --endpoint flag (default: use AGENT_ARN to construct URL)
