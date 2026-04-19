@@ -68,19 +68,34 @@ causes AgentCore to fail silently or produce no evaluation results.
 ```python
 _service_name = "your-agent-name"
 _agent_id = f"{_service_name}-1234567890"
+_endpoint = "DEFAULT"                  # runtime endpoint name
+_account_id = "000000000000"           # AWS account id
+_region = "us-east-1"
+
+# Log group MUST include the endpoint suffix — this is what agentcore run eval
+# and the AWS SDK evaluate sample query. A bare /runtimes/<id> group (as the
+# 3P env-var example shows) is *not* discovered by the eval log-matching step.
+_log_group_path = f"/aws/bedrock-agentcore/runtimes/{_agent_id}-{_endpoint}"
 
 resource = Resource.create({
     "service.name": _service_name,
     "aws.local.service": _service_name,
     "aws.service.type": "gen_ai_agent",
-    "aws.log.group.names": f"/aws/bedrock-agentcore/runtimes/{_agent_id}",
+    "aws.log.group.names": _log_group_path,
+    "cloud.resource_id": (
+        f"arn:aws:bedrock-agentcore:{_region}:{_account_id}:"
+        f"runtime/{_agent_id}/endpoint/{_endpoint}"
+    ),
     "telemetry.auto.version": "0.12.2-aws",
 })
 ```
 
 **Why each attribute matters:**
 - `aws.service.type: "gen_ai_agent"` — AgentCore uses this to classify the service
-- `aws.log.group.names` with `/runtimes/` prefix — evaluations discover logs via this
+- `aws.log.group.names` — evaluation log-matcher queries exactly this path
+  (must include `-{ENDPOINT}` suffix, e.g. `-DEFAULT`)
+- `cloud.resource_id` — `agentcore run eval --runtime-arn` uses this to resolve which
+  spans belong to the agent endpoint; omitting it means zero spans are discovered
 - `telemetry.auto.version: "0.12.2-aws"` — matches the Strands distro version AgentCore expects
 
 ---
@@ -156,7 +171,9 @@ _log_provider.add_log_record_processor(
         endpoint=_logs_endpoint,
         session=_log_session,
         headers={
-            "x-aws-log-group": f"/aws/bedrock-agentcore/{_agent_id}",
+            # Must match the resource attribute exactly — the same
+            # /runtimes/<id>-<endpoint> path.
+            "x-aws-log-group": _log_group_path,
             "x-aws-log-stream": "runtime-logs",
             "x-aws-metric-namespace": "bedrock-agentcore",
         },
@@ -186,11 +203,11 @@ _bedrock_logger = _log_provider.get_logger(
 ## MeterProvider (Metrics)
 
 ```python
-_emf_log_group = f"/aws/bedrock-agentcore/{_agent_id}"
-
+# Use the same /runtimes/<id>-<endpoint> path as the log exporter so EMF
+# metrics land in the group AgentCore indexes for this agent.
 _emf_exporter = AwsCloudWatchEmfExporter(
     namespace="bedrock-agentcore",
-    log_group_name=_emf_log_group,
+    log_group_name=_log_group_path,
     log_stream_name="runtime-logs",
     aws_region=_region,
     session=botocore.session.Session(),
@@ -252,9 +269,12 @@ export OTEL_PYTHON_DISTRO=aws_distro
 export OTEL_PYTHON_CONFIGURATOR=aws_configurator
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_SERVICE_NAME=your-agent-name
-export OTEL_RESOURCE_ATTRIBUTES="service.name=your-agent-name,aws.log.group.names=/aws/bedrock-agentcore/runtimes/your-agent-id"
+# Note: both aws.log.group.names and the x-aws-log-group header must end in
+# `-<ENDPOINT>` (e.g. `-DEFAULT`). cloud.resource_id must be the full endpoint
+# ARN so agentcore run eval can resolve the --runtime-arn filter.
+export OTEL_RESOURCE_ATTRIBUTES="service.name=your-agent-name,aws.log.group.names=/aws/bedrock-agentcore/runtimes/your-agent-id-DEFAULT,cloud.resource_id=arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/your-agent-id/endpoint/DEFAULT"
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://xray.us-east-1.amazonaws.com
-export OTEL_EXPORTER_OTLP_LOGS_HEADERS="x-aws-log-group=/aws/bedrock-agentcore/your-agent-id,x-aws-log-stream=runtime-logs,x-aws-metric-namespace=bedrock-agentcore"
+export OTEL_EXPORTER_OTLP_LOGS_HEADERS="x-aws-log-group=/aws/bedrock-agentcore/runtimes/your-agent-id-DEFAULT,x-aws-log-stream=runtime-logs,x-aws-metric-namespace=bedrock-agentcore"
 ```
 
 Do NOT append `/v1` to `OTEL_EXPORTER_OTLP_ENDPOINT` — the SDK appends `/v1/traces`

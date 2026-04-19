@@ -71,11 +71,15 @@ def _emit_structured_log(body, attributes=None, span_context=None):
         trace_id=tid,
         span_id=sid,
         trace_flags=flags,
-        resource=resource,
         attributes=merged_attrs or None,
     )
     _struct_logger.emit(record)
 ```
+
+**Why no `resource=` kwarg:** opentelemetry-sdk ≥ 1.40 removed that parameter from
+`LogRecord.__init__`. The `LoggerProvider` already carries the resource and attaches it
+at emit time — passing it again raises `TypeError`. (If you're on ≤ 1.39 it's a silent
+no-op anyway.)
 
 **Why `severity_text=""`:** Strands structured logs use empty severityText. Using `"INFO"`
 causes a mismatch that can confuse log filtering.
@@ -117,7 +121,6 @@ def _emit_bedrock_log(body, event_name, span_context=None):
         severity_number=SeverityNumber.INFO,
         severity_text="",
         trace_id=tid, span_id=sid, trace_flags=flags,
-        resource=resource,
         attributes={"event.name": event_name, "gen_ai.system": "aws.bedrock"},
     )
     _bedrock_logger.emit(record)
