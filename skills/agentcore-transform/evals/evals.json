@@ -1,0 +1,426 @@
+{
+  "skill_name": "agentcore-transform",
+  "evals": [
+    {
+      "id": 1,
+      "category": "triggering",
+      "prompt": "Deploy my Claude Agent SDK chat app to AgentCore",
+      "expected_output": "Skill runs Phase 1 (Analysis), detects language, SDK, framework, store, and presents analysis report before proceeding.",
+      "expectations": [
+        "Detects Claude Agent SDK import in the project",
+        "Identifies the web framework (Express, FastAPI, etc.)",
+        "Maps the conversation store type (in-memory, DB, etc.)",
+        "Identifies WebSocket or SSE setup",
+        "Presents analysis report and asks for confirmation before Phase 2"
+      ]
+    },
+    {
+      "id": 2,
+      "category": "memory-integration",
+      "prompt": "Add AgentCore Memory to my agent for persistent conversation storage",
+      "expected_output": "Skill generates memory-client, memory-store, store router, and modifies session module to inject STM history + LTM context.",
+      "expectations": [
+        "Creates memory-client module with STM and LTM helpers",
+        "Creates memory-store module matching the original store interface",
+        "Creates store router with AGENTCORE_MEMORY_ID feature flag",
+        "Modifies session/agent module to load bounded STM history",
+        "Modifies session/agent module to search LTM for cross-session context",
+        "Adds @aws-sdk/client-bedrock-agentcore dependency"
+      ]
+    },
+    {
+      "id": 3,
+      "category": "python-support",
+      "prompt": "I want to migrate my Python FastAPI chat agent to AWS AgentCore",
+      "expected_output": "Skill detects Python/FastAPI, generates Python-specific templates for all AgentCore components.",
+      "expectations": [
+        "Detects Python language and FastAPI framework",
+        "Generates runtime_server.py with FastAPI patterns",
+        "Generates memory_client.py using boto3",
+        "Generates auth.py with JWT decoding",
+        "Generates deploy.sh with pip-based dependency installation",
+        "Adds boto3 to requirements.txt"
+      ]
+    },
+    {
+      "id": 4,
+      "category": "deploy-script",
+      "prompt": "Generate a deployment script for my AgentCore app",
+      "expected_output": "Generates a complete deploy.sh with all AgentCore setup steps and --destroy support.",
+      "expectations": [
+        "Script includes prerequisites check",
+        "Script includes agentcore create + agentcore add agent --type byo step",
+        "Script includes Cognito setup",
+        "Script includes JWT authorizer configuration",
+        "Script includes Memory resource creation with semantic strategy",
+        "Script includes agentcore deploy with environment variables",
+        "Script includes .env file generation",
+        "Script supports --destroy flag for teardown",
+        "If frontend detected, includes S3 + CloudFront deployment"
+      ]
+    },
+    {
+      "id": 5,
+      "category": "test-generation",
+      "prompt": "Transform my chat app to use AgentCore and generate tests",
+      "expected_output": "After transformation, generates tests/agentcore-test.sh with auth, CRUD, WebSocket, and Memory verification tests.",
+      "expectations": [
+        "Test script authenticates via Cognito",
+        "Test script creates and lists chats via /invocations",
+        "Test script verifies unauthenticated requests are rejected",
+        "Test script tests WebSocket connectivity (if websocat available)",
+        "Test script verifies Memory resource is active",
+        "Test script cleans up test data",
+        "Test script prints pass/fail summary",
+        "Test script supports --endpoint flag for different targets"
+      ]
+    },
+    {
+      "id": 6,
+      "category": "skip-feature",
+      "prompt": "Deploy to AgentCore but skip the frontend deployment",
+      "expected_output": "Skill respects user's request to skip frontend, generates backend-only deployment.",
+      "expectations": [
+        "Asks for confirmation in Phase 2 plan",
+        "Skips CloudFormation template generation",
+        "Skips CloudFront Function generation",
+        "deploy.sh has HAS_FRONTEND=false",
+        "No S3 sync or CloudFront invalidation steps"
+      ]
+    },
+    {
+      "id": 7,
+      "category": "triggering-negative",
+      "prompt": "Deploy my Express app to EC2 with auto-scaling",
+      "expected_output": "Skill should NOT activate. This is a general AWS deployment question unrelated to AgentCore.",
+      "expectations": [
+        "Skill does NOT trigger",
+        "No Phase 1 analysis is started",
+        "Response addresses general EC2 deployment instead"
+      ]
+    },
+    {
+      "id": 8,
+      "category": "triggering-negative",
+      "prompt": "What is AgentCore Memory and how does it work?",
+      "expected_output": "Skill should NOT activate for purely informational questions.",
+      "expectations": [
+        "Skill does NOT trigger (no actionable transformation request)",
+        "Response provides informational explanation instead"
+      ]
+    },
+    {
+      "id": 9,
+      "category": "analysis-accuracy",
+      "prompt": "Add AgentCore to my app",
+      "project_context": "TypeScript Express app with in-memory Map store, ws WebSocket, React+Vite frontend",
+      "expected_output": "Phase 1 analysis correctly identifies all components of the sample chatapp.",
+      "expectations": [
+        "Language detected as TypeScript",
+        "SDK detected as @anthropic-ai/claude-agent-sdk",
+        "Web framework detected as Express",
+        "WebSocket library detected as ws",
+        "Conversation store detected as in-memory Map",
+        "Store interface methods listed (createChat, addMessage, getMessages, etc.)",
+        "Frontend detected as React + Vite",
+        "Frontend build command identified (npm run build -> dist/)",
+        "Model config identified (hardcoded value or env var)"
+      ]
+    },
+    {
+      "id": 10,
+      "category": "analysis-accuracy",
+      "prompt": "Migrate my Python agent to AgentCore",
+      "project_context": "Python FastAPI app with SQLite store, websockets library, no frontend",
+      "expected_output": "Phase 1 analysis correctly identifies Python/FastAPI project with no frontend.",
+      "expectations": [
+        "Language detected as Python",
+        "SDK detected as claude_agent_sdk",
+        "Web framework detected as FastAPI",
+        "WebSocket library detected as websockets",
+        "Conversation store detected as SQLite",
+        "Frontend correctly identified as None",
+        "Analysis does not assume frontend exists"
+      ]
+    },
+    {
+      "id": 11,
+      "category": "analysis-model-detection",
+      "prompt": "Deploy my agent to AgentCore Runtime",
+      "project_context": "App with model: 'opus' hardcoded in agent config",
+      "expected_output": "Phase 1 analysis detects and reports the exact model value.",
+      "expectations": [
+        "Model config reported as hardcoded 'opus'",
+        "Analysis flags that model needs to become configurable via env var",
+        "Plan mentions ANTHROPIC_MODEL environment variable"
+      ]
+    },
+    {
+      "id": 12,
+      "category": "plan-correctness",
+      "prompt": "Transform my app to use AgentCore. Proceed with the plan.",
+      "expected_output": "Phase 2 plan lists all files to create/modify with correct language-specific extensions.",
+      "expectations": [
+        "Plan lists memory-client, memory-store, store-router files",
+        "Plan lists runtime-server file",
+        "Plan lists auth module",
+        "Plan lists deploy.sh",
+        "Plan lists test script",
+        "Plan pauses and asks user for confirmation before Phase 3",
+        "File extensions match detected language (.ts or .py)"
+      ]
+    },
+    {
+      "id": 13,
+      "category": "transform-memory-blob",
+      "prompt": "Add AgentCore Memory to my chat app with full STM and LTM support",
+      "expected_output": "Generated memory-client uses JSON.stringify for blob payloads and includes Java Map parser.",
+      "expectations": [
+        "memory-client uses JSON.stringify() for blob payloads (not raw objects)",
+        "memory-client includes parseJavaMapString() fallback parser",
+        "Blob read logic tries JSON.parse() first, falls back to Java Map parser",
+        "Registry events stored as JSON strings"
+      ]
+    },
+    {
+      "id": 14,
+      "category": "transform-ltm-injection",
+      "prompt": "Transform my chat app to use AgentCore with cross-session memory",
+      "expected_output": "LTM search is actively called before each agent turn, not just defined.",
+      "expectations": [
+        "searchLTM() function is defined in memory-client",
+        "sendMessage() calls searchLTM(actorId, content) before agent query",
+        "LTM results are prepended to the user message",
+        "System prompt updated to instruct agent about LTM context usage",
+        "LTM context format includes '[Relevant context from previous conversations:]'"
+      ]
+    },
+    {
+      "id": 15,
+      "category": "transform-feature-flag",
+      "prompt": "Add AgentCore Memory but keep local dev mode working",
+      "expected_output": "Store router uses AGENTCORE_MEMORY_ID env var as feature flag with local fallback.",
+      "expectations": [
+        "store.ts/store.py checks AGENTCORE_MEMORY_ID environment variable",
+        "When env var is absent, app uses original in-memory store",
+        "When env var is set, app uses Memory-backed store",
+        "All Memory API calls wrapped in try/catch with graceful degradation",
+        "Warnings logged (not errors) when Memory is unavailable"
+      ]
+    },
+    {
+      "id": 16,
+      "category": "transform-runtime",
+      "prompt": "Make my app deployable to AgentCore Runtime",
+      "expected_output": "Generated runtime-server listens on port 8080 with /invocations router and /health endpoint.",
+      "expectations": [
+        "Server listens on port 8080",
+        "POST /invocations endpoint dispatches via method+path fields",
+        "GET /health endpoint returns 200",
+        "WebSocket on /ws with manual upgrade handling",
+        "JWT decoded (not verified) to extract actorId",
+        "Graceful shutdown on SIGTERM",
+        "One agent session per chatId"
+      ]
+    },
+    {
+      "id": 17,
+      "category": "transform-auth",
+      "prompt": "Add Cognito authentication to my agent app",
+      "expected_output": "Auth module extracts actorId from JWT with dev-mode fallback.",
+      "expectations": [
+        "getActorIdFromToken() extracts sub or cognito:username",
+        "Dev mode skips auth when Cognito env vars not set",
+        "WebSocket upgrade handler reads token from query param",
+        "Expired/malformed tokens return 401, no crash",
+        "Full JWT tokens are never logged"
+      ]
+    },
+    {
+      "id": 18,
+      "category": "transform-frontend",
+      "prompt": "Deploy my React chat app frontend to CloudFront with AgentCore backend",
+      "expected_output": "Frontend adapted with production mode detection, /invocations routing, and Cognito login.",
+      "expectations": [
+        "Frontend detects production via VITE_COGNITO_POOL_ID presence",
+        "Production mode uses /invocations path (not /api)",
+        "/invocations body path field includes /api prefix (e.g., /api/chats)",
+        "Cognito login form generated using fetch to IDP API",
+        "Authorization: Bearer header on all REST calls",
+        "WebSocket not connected until authenticated (null URL)",
+        "client/vite-env.d.ts created with /// <reference types='vite/client' />",
+        "VITE_AWS_REGION included in .env.production"
+      ]
+    },
+    {
+      "id": 19,
+      "category": "transform-model-config",
+      "prompt": "Transform my app - it currently uses model: 'opus'",
+      "expected_output": "Model config made dynamic via environment variable with original as fallback.",
+      "expectations": [
+        "AI client reads process.env.ANTHROPIC_MODEL (TS) or os.environ.get('ANTHROPIC_MODEL') (Python)",
+        "Original model value used as fallback default",
+        "deploy.sh resolves correct Bedrock inference profile ID for target region"
+      ]
+    },
+    {
+      "id": 20,
+      "category": "deploy-dockerfile-patch",
+      "prompt": "Deploy my tsx-based TypeScript agent to AgentCore",
+      "expected_output": "deploy.sh patches auto-generated Dockerfile for tsx compatibility.",
+      "expectations": [
+        "deploy.sh removes 'npm run build' from Dockerfile",
+        "deploy.sh removes 'npm prune --production' from Dockerfile",
+        "deploy.sh fixes CMD to use 'npx tsx'",
+        "agentcore deploy uses --env flags for CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_MODEL, AGENTCORE_MEMORY_ID, AWS_REGION"
+      ]
+    },
+    {
+      "id": 21,
+      "category": "deploy-inference-profile",
+      "prompt": "Deploy to AgentCore in eu-west-1 region",
+      "expected_output": "Deploy script resolves EU inference profile prefix.",
+      "expectations": [
+        "Inference profile uses eu.anthropic.claude-* prefix for eu-west-1",
+        "Not us.* or global.* prefix",
+        "Script includes logic to map region to correct prefix"
+      ]
+    },
+    {
+      "id": 22,
+      "category": "deploy-agent-name",
+      "prompt": "Deploy my-chat-app to AgentCore",
+      "expected_output": "Agent name sanitized to replace hyphens with underscores.",
+      "expectations": [
+        "Agent name uses underscores (e.g., my_chat_app, not my-chat-app)",
+        "Agent name matches pattern ^[a-zA-Z][a-zA-Z0-9_]*$"
+      ]
+    },
+    {
+      "id": 23,
+      "category": "deploy-timing-hints",
+      "prompt": "Generate deploy.sh for my AgentCore app",
+      "expected_output": "Deploy script prints timing hints before all long-running operations.",
+      "expectations": [
+        "Prints timing hint before memory creation (1-2 min)",
+        "Prints timing hint before container deploy (3-5 min)",
+        "Prints timing hint before CloudFront create/update (5-15 min)",
+        "CloudFormation update checks output before calling wait"
+      ]
+    },
+    {
+      "id": 24,
+      "category": "deploy-env-generation",
+      "prompt": "Deploy to AgentCore and set up environment",
+      "expected_output": "Deploy script generates .env files and updates .gitignore.",
+      "expectations": [
+        ".env generated with AGENT_ARN, MEMORY_ID, Cognito creds",
+        ".env.production generated BEFORE npm run build",
+        ".gitignore updated with .env, .agentcore_cognito.json, agentcore/.cli/, agentcore/cdk/cdk.out/",
+        "No duplicate entries added to .gitignore"
+      ]
+    },
+    {
+      "id": 25,
+      "category": "deploy-destroy",
+      "prompt": "Generate deploy.sh with teardown support",
+      "expected_output": "deploy.sh --destroy cleans up all resources.",
+      "expectations": [
+        "--destroy flag is supported",
+        "Destroys AgentCore Runtime agent",
+        "Destroys Memory resource (checks status first, no --wait)",
+        "Deletes CloudFormation stack if frontend was deployed",
+        "Deletes Cognito User Pool"
+      ]
+    },
+    {
+      "id": 26,
+      "category": "test-auth-method",
+      "prompt": "Generate post-deployment tests for my AgentCore app",
+      "expected_output": "Test script uses Python for API calls with Bearer-only auth.",
+      "expectations": [
+        "Test script uses Python urllib.request (not curl)",
+        "Authorization uses Bearer token only (no SigV4)",
+        "All /invocations calls include ?qualifier=DEFAULT",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id header included",
+        "Accept: text/event-stream, application/json header included"
+      ]
+    },
+    {
+      "id": 27,
+      "category": "security",
+      "prompt": "Transform and deploy my agent to AgentCore",
+      "expected_output": "Generated code follows security best practices.",
+      "expectations": [
+        "JWT tokens never fully logged (only first/last chars)",
+        ".env files never committed to git",
+        "Credentials not hardcoded in source files",
+        ".gitignore includes all sensitive files",
+        "Auth handles missing/expired/malformed tokens gracefully"
+      ]
+    },
+    {
+      "id": 28,
+      "category": "error-handling",
+      "prompt": "Add AgentCore Memory with graceful fallback",
+      "expected_output": "All Memory API calls have error handling with degradation to local store.",
+      "expectations": [
+        "Memory API calls wrapped in try/catch",
+        "Failures log warnings (not throw errors)",
+        "App continues functioning with degraded storage on Memory failure",
+        "WebSocket proxy errors close browser connection cleanly"
+      ]
+    },
+    {
+      "id": 29,
+      "category": "esm-compatibility",
+      "prompt": "Transform my ESM TypeScript app to use AgentCore",
+      "project_context": "package.json has type: module",
+      "expected_output": "Generated code uses ESM import/export syntax.",
+      "expectations": [
+        "Generated .ts files use import/export (not require/module.exports)",
+        "No CommonJS patterns in generated code",
+        "Preserves user's existing ESM style"
+      ]
+    },
+    {
+      "id": 30,
+      "category": "package-deps",
+      "prompt": "Transform my TypeScript agent to use AgentCore",
+      "expected_output": "All required dependencies added to package.json.",
+      "expectations": [
+        "@aws-sdk/client-bedrock-agentcore added",
+        "@opentelemetry/auto-instrumentations-node added",
+        "aws-jwt-verify added",
+        "dotenv added",
+        "uuid added",
+        "npm scripts added: dev:runtime, dev:proxy, dev:deployed, start:runtime"
+      ]
+    },
+    {
+      "id": 31,
+      "category": "macos-compat",
+      "prompt": "Generate deploy.sh for macOS development",
+      "expected_output": "Deploy script avoids macOS-incompatible commands.",
+      "expectations": [
+        "Script does not use grep -P",
+        "Uses sed or compatible alternatives",
+        "Cognito password properly quoted for shell expansion",
+        "Works on both macOS (zsh) and Linux (bash)"
+      ]
+    },
+    {
+      "id": 32,
+      "category": "python-venv",
+      "prompt": "Deploy my Python agent to AgentCore",
+      "project_context": "Python project with existing .venv directory",
+      "expected_output": "deploy.sh detects and uses existing Python virtual environment.",
+      "expectations": [
+        "Detects existing .venv or venv directory",
+        "Uses venv's Python and agentcore CLI",
+        "AGENTCORE_CMD variable set to venv path",
+        "All agentcore CLI calls use $AGENTCORE_CMD"
+      ]
+    }
+  ]
+}

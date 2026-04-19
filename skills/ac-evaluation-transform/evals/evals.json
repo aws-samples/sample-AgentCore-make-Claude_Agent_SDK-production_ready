@@ -1,0 +1,81 @@
+{
+  "skill_name": "ac-evaluation-transform",
+  "evals": [
+    {
+      "id": 1,
+      "category": "triggering",
+      "prompt": "My Claude Agent SDK agent shows up fine in X-Ray and aws/spans, but when I run `agentcore run eval --runtime-arn ...` every evaluator comes back with errorMessage 'Session span data is incomplete. Span with ID: <id> and name: invoke_agent <name> is missing a corresponding log event'. The I/O summary log is definitely in CloudWatch with the right spanId. What's wrong?",
+      "expected_output": "Skill triggers and diagnoses the log-group-suffix mismatch: the instrumentation writes to /aws/bedrock-agentcore/runtimes/{AGENT_ID} but the eval service queries /aws/bedrock-agentcore/runtimes/{AGENT_ID}-{ENDPOINT}. Recommends changing aws.log.group.names, x-aws-log-group OTLP header, and EMF log_group_name all to the -{ENDPOINT}-suffixed path.",
+      "files": [],
+      "expectations": [
+        "Response identifies the /runtimes/{AGENT_ID}-{ENDPOINT} vs /runtimes/{AGENT_ID} discrepancy as the root cause",
+        "Response names all three places that must be updated (resource attribute, OTLP log header, EMF exporter log_group_name)",
+        "Response references the AWS SDK sample from getting-started-on-demand.html or the equivalent agentcore run eval behavior",
+        "Response does NOT suggest rewriting tool hooks, I/O summary body format, or span hierarchy (those are already correct in this scenario)"
+      ]
+    },
+    {
+      "id": 2,
+      "category": "fix-error",
+      "prompt": "My Claude agent keeps failing AgentCore evaluations with 'LogEventMissingException: Session span data is incomplete. Span with ID: abc123 and name: tool.word_count is missing a corresponding log event'. The agent has basic OTEL (spans export to aws/spans, invoke_agent has its I/O summary) but something is wrong with the tool spans. Can you fix it?",
+      "expected_output": "The fix adds per-tool I/O summary emission inside post_tool_use_hook, emitted BEFORE span.end() and tied to the tool span via an explicit span_context=(trace_id, span_id, trace_flags) argument. The _emit_structured_log helper accepts a span_context parameter so per-tool logs carry the tool-span's spanId rather than the current-span's.",
+      "files": ["evals/fixtures/tool_hook_missing_io_log.py"],
+      "expectations": [
+        "Fix emits a per-tool I/O summary log inside post_tool_use_hook before the tool span is ended",
+        "Per-tool log uses the tool span's own (trace_id, span_id, trace_flags) via span_context= instead of trace.get_current_span()",
+        "Per-tool log body follows the input-role-tool / output-role-assistant shape from references/structured-logs.md",
+        "Fix does NOT put role:tool entries into the invoke_agent-level input.messages (that would cause AgentSpanMappingException)"
+      ]
+    },
+    {
+      "id": 3,
+      "category": "add-instrumentation",
+      "prompt": "I have a vanilla Claude Agent SDK agent with no OTEL at all. It uses an MCP-style tool via create_sdk_mcp_server. I need it to pass all 9 AgentCore built-in evaluators when invoked via `agentcore run eval`. Please add full instrumentation but keep the tools and prompts unchanged.",
+      "expected_output": "Agent is modified with: Resource carrying aws.service.type='gen_ai_agent', aws.log.group.names with -{ENDPOINT} suffix, cloud.resource_id full ARN; TracerProvider using OTLPAwsSpanExporter + BaggageSpanProcessor; LoggerProvider with two loggers under scopes strands.telemetry.tracer and opentelemetry.instrumentation.botocore.bedrock-runtime; MeterProvider with AwsCloudWatchEmfExporter; pre/post tool-use hooks that create parented tool spans and emit per-tool I/O summaries; invoke_agent + execute_event_loop_cycle + chat + chat<model> span hierarchy; session.id via baggage; provider.shutdown() ordering trace→log→metric.",
+      "files": ["evals/fixtures/vanilla_math_agent.py"],
+      "expectations": [
+        "aws.log.group.names uses the {AGENT_ID}-{ENDPOINT} suffixed path",
+        "cloud.resource_id is the full runtime endpoint ARN (arn:aws:bedrock-agentcore:<region>:<acct>:runtime/<id>/endpoint/<name>)",
+        "The x-aws-log-group OTLP header matches aws.log.group.names exactly",
+        "The EMF exporter's log_group_name matches aws.log.group.names exactly",
+        "Tracer scope is 'strands.telemetry.tracer' (not __name__)",
+        "Tool spans are created with context=_active_cycle_context so they share the invoke_agent traceId",
+        "post_tool_use_hook emits a per-tool I/O summary BEFORE span.end() with tool span's span_context",
+        "invoke_agent-level I/O summary is emitted AFTER context.detach of the cycle context",
+        "invoke_agent input.messages contains only role:user entries (no role:tool)",
+        "LogRecord(...) calls do NOT pass a resource= kwarg",
+        "Original @tool decorators, tool functions, create_sdk_mcp_server call, and system prompts are byte-identical to the input file",
+        "Shutdown order is provider.shutdown() (traces) → _log_provider.shutdown() → _meter_provider.shutdown()"
+      ]
+    },
+    {
+      "id": 4,
+      "category": "from-scratch",
+      "prompt": "I'm building a new Claude Agent SDK customer support agent from scratch with three tools: search_kb, create_ticket, check_status. I want it to pass Bedrock AgentCore evaluations from day 1 when deployed to an AgentCore Runtime endpoint named DEFAULT. Set up the observability instrumentation.",
+      "expected_output": "Produces either a new agent file or a shared _instrumentation.py module plus an agent that imports it, applying every pattern from SKILL.md Steps 1–11. Hook registration covers all three tools. gen_ai.agent.tools attribute lists search_kb/create_ticket/check_status. Instrumentation is cleanly separated from application logic (ideally in a shared module).",
+      "files": [],
+      "expectations": [
+        "Resource attributes include aws.service.type='gen_ai_agent', aws.log.group.names with -DEFAULT suffix, and cloud.resource_id with endpoint/DEFAULT",
+        "gen_ai.agent.tools attribute on invoke_agent span is a JSON array containing all three tool names",
+        "PreToolUse and PostToolUse hooks are registered for each tool (HookMatcher wrapped)",
+        "All three providers (trace, log, meter) are initialized before the client runs",
+        "Shutdown block calls provider.shutdown() BEFORE _log_provider.shutdown() and _meter_provider.shutdown()",
+        "Instrumentation does not hardcode the account id or region — sourced from env or botocore session"
+      ]
+    },
+    {
+      "id": 5,
+      "category": "verification",
+      "prompt": "I applied the ac-evaluation-transform skill to my agent. Before I run `agentcore run eval`, how do I sanity-check that the telemetry is actually correct in CloudWatch? Give me a checklist.",
+      "expected_output": "Step-by-step verification: (1) run the agent with a recorded session-id; (2) wait ~4 minutes for CloudWatch ingestion; (3) list streams in /aws/.../runtimes/<id>-<endpoint> and confirm runtime-logs stream exists; (4) Logs Insights filter by session.id, confirm at least one strands.telemetry.tracer record with body.input/body.output/body.usage and per-tool records; (5) query aws/spans for invoke_agent <name> span and match its spanId with the I/O summary spanId; (6) run `agentcore run eval --runtime-arn <arn> --session-id <sid>` only after the span↔log spanId correspondence is confirmed.",
+      "files": [],
+      "expectations": [
+        "Recommends a concrete Logs Insights query that filters on attributes.session.id",
+        "Recommends an aws/spans query that finds 'invoke_agent <name>' by name",
+        "Explicitly checks that the invoke_agent spanId appears in both the span record and the I/O summary log record",
+        "Mentions the ~4-minute CloudWatch ingestion delay",
+        "Uses the -{ENDPOINT}-suffixed log group path (not the bare /runtimes/<id> path)"
+      ]
+    }
+  ]
+}

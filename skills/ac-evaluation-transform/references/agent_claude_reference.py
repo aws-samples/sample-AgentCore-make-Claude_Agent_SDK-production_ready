@@ -46,10 +46,9 @@ from amazon.opentelemetry.distro.exporter.otlp.aws.traces.otlp_aws_span_exporter
 # Configuration
 # ---------------------------------------------------------------------------
 _service_name = "super-simple-agent-claude"
-_emf_log_group = os.environ.get(
-    "AGENT_LOG_GROUP",
-    f"/aws/bedrock-agentcore/{_service_name}-1234567890",
-)
+# Substitute with the real AgentCore runtime id + endpoint (usually DEFAULT).
+_agent_id = os.environ.get("AGENTCORE_AGENT_ID", f"{_service_name}-1234567890")
+_endpoint = os.environ.get("AGENTCORE_ENDPOINT", "DEFAULT")
 
 # Resolve region from OTEL_EXPORTER_OTLP_ENDPOINT or environment
 _traces_endpoint = os.environ.get(
@@ -58,6 +57,18 @@ _traces_endpoint = os.environ.get(
 _parsed = urlparse(_traces_endpoint)
 _region_match = re.search(r"\.([a-z]{2}-[a-z]+-\d)\.amazonaws\.com", _parsed.hostname or "")
 _region = _region_match.group(1) if _region_match else os.environ.get("AWS_REGION", "us-east-1")
+_account_id = os.environ.get("AWS_ACCOUNT_ID", "000000000000")
+
+# The -{endpoint}-suffixed log group is what agentcore run eval queries for
+# I/O summary logs. Override via AGENT_LOG_GROUP only if you know what you're doing.
+_log_group_path = os.environ.get(
+    "AGENT_LOG_GROUP",
+    f"/aws/bedrock-agentcore/runtimes/{_agent_id}-{_endpoint}",
+)
+_cloud_resource_id = (
+    f"arn:aws:bedrock-agentcore:{_region}:{_account_id}:"
+    f"runtime/{_agent_id}/endpoint/{_endpoint}"
+)
 
 # ---------------------------------------------------------------------------
 # SigV4 sessions
@@ -79,7 +90,8 @@ resource = Resource.create({
     "service.name": _service_name,
     "aws.local.service": _service_name,
     "aws.service.type": "gen_ai_agent",
-    "aws.log.group.names": f"/aws/bedrock-agentcore/runtimes/{_service_name}-1234567890",
+    "aws.log.group.names": _log_group_path,
+    "cloud.resource_id": _cloud_resource_id,
     "telemetry.auto.version": "0.12.2-aws",
 })
 
@@ -116,7 +128,8 @@ _log_provider.add_log_record_processor(
         endpoint=_logs_endpoint,
         session=_log_session,
         headers={
-            "x-aws-log-group": f"/aws/bedrock-agentcore/super-simple-agent-claude-1234567890",
+            # Must match aws.log.group.names resource attr exactly.
+            "x-aws-log-group": _log_group_path,
             "x-aws-log-stream": "runtime-logs",
             "x-aws-metric-namespace": "bedrock-agentcore",
         },
@@ -138,7 +151,7 @@ _bedrock_logger = _log_provider.get_logger(
 # ---------------------------------------------------------------------------
 _emf_exporter = AwsCloudWatchEmfExporter(
     namespace="bedrock-agentcore",
-    log_group_name=_emf_log_group,
+    log_group_name=_log_group_path,
     log_stream_name="runtime-logs",
     aws_region=_region,
     session=botocore.session.Session(),
@@ -222,7 +235,6 @@ def _emit_structured_log(body, attributes=None, span_context=None):
         trace_id=tid,
         span_id=sid,
         trace_flags=flags,
-        resource=resource,
         attributes=merged_attrs or None,
     )
     _struct_logger.emit(record)
@@ -252,7 +264,6 @@ def _emit_bedrock_log(body, event_name, span_context=None):
         trace_id=tid,
         span_id=sid,
         trace_flags=flags,
-        resource=resource,
         attributes={"event.name": event_name, "gen_ai.system": "aws.bedrock"},
     )
     _bedrock_logger.emit(record)

@@ -4,12 +4,15 @@ description: >-
   Transform a Claude Agent SDK agent to emit correct OpenTelemetry traces, structured logs,
   and CloudWatch EMF metrics so that all 9 Amazon Bedrock AgentCore Evaluation built-in
   evaluators pass with zero errors. Use this skill whenever the user mentions AgentCore
-  evaluations, OTEL instrumentation for Claude Agent SDK agents, making a Claude agent
-  compatible with Bedrock evaluations, or adding observability/telemetry to a Claude Agent
-  SDK application. Also trigger when the user encounters AgentCore evaluation errors like
-  AgentSpanMappingException, LogEventMissingException, or "span data is incomplete". This
-  skill modifies only the instrumentation layer — it never changes the agent's application
-  logic, tools, or prompts.
+  evaluations, `agentcore run eval`, OTEL instrumentation for Claude Agent SDK agents,
+  making a Claude agent compatible with Bedrock evaluations, or adding
+  observability/telemetry to a Claude Agent SDK application. Also trigger when the user
+  encounters AgentCore evaluation errors like AgentSpanMappingException,
+  LogEventMissingException, "span data is incomplete", "missing a corresponding log
+  event", or when their agent's spans appear in `aws/spans` but evaluators still report
+  missing log events (the classic log-group-suffix mismatch). This skill modifies only
+  the instrumentation layer — it never changes the agent's application logic, tools, or
+  prompts.
 ---
 
 # AC Evaluation Transform
@@ -53,26 +56,47 @@ reach that step. **Do not change the agent's application logic, tools, or prompt
 Read `references/otel-setup.md` for the full import list and provider setup.
 
 Required packages:
-- `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`
+- `opentelemetry-api`, `opentelemetry-sdk` (**≥ 1.40** — older releases still accept the
+  `LogRecord(resource=)` kwarg the reference impl used to pass, but 1.40 removed it. The
+  reference impl here no longer passes it, so any 1.x release works, but docs assume
+  modern versions.)
+- `opentelemetry-exporter-otlp-proto-http`
 - `aws-opentelemetry-distro` (provides `OTLPAwsSpanExporter` + `AwsCloudWatchEmfExporter`)
 - `aws-requests-auth`, `botocore`, `requests`
 
 ### Step 2: Create the OTEL Resource
 
 The Resource **must** include these attributes — without them, AgentCore cannot discover
-the agent's logs:
+the agent's spans or match them to log events:
 
 ```python
 resource = Resource.create({
     "service.name": SERVICE_NAME,
     "aws.local.service": SERVICE_NAME,
     "aws.service.type": "gen_ai_agent",
-    "aws.log.group.names": f"/aws/bedrock-agentcore/runtimes/{AGENT_ID}",
+    "aws.log.group.names": f"/aws/bedrock-agentcore/runtimes/{AGENT_ID}-{ENDPOINT}",
+    "cloud.resource_id": (
+        f"arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT_ID}:"
+        f"runtime/{AGENT_ID}/endpoint/{ENDPOINT}"
+    ),
     "telemetry.auto.version": "0.12.2-aws",
 })
 ```
 
-The `aws.log.group.names` value **must** use the `/runtimes/` path prefix.
+**Critical path rules:**
+
+- `aws.log.group.names` **must** be `/aws/bedrock-agentcore/runtimes/{AGENT_ID}-{ENDPOINT}`
+  (e.g. `...HEDP-DEFAULT`). The `agentcore run eval` CLI and the AWS SDK sample in the
+  [on-demand eval docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/getting-started-on-demand.html#download-span-logs)
+  query this `-{ENDPOINT}`-suffixed group. Writing to the bare `/aws/.../runtimes/{AGENT_ID}`
+  (as the 3P env-var doc example shows) causes `LogEventMissingException` because the eval
+  log-matching step cannot find the I/O summary log in the group it queries.
+- `cloud.resource_id` must be the full runtime endpoint ARN. Without it `agentcore run eval`
+  cannot resolve spans for `--runtime-arn`, and the evaluator cannot join spans→logs.
+- The **same** log-group path must be used in three places: the `aws.log.group.names`
+  resource attribute, the `x-aws-log-group` OTLP header, and the EMF exporter's
+  `log_group_name` kwarg. A mismatch in any one makes logs split across groups and breaks
+  evaluation.
 
 ### Step 3: Set up TracerProvider
 
@@ -208,7 +232,11 @@ _meter_provider.shutdown() # Metrics → CloudWatch EMF
 
 After transformation, verify these properties:
 
-- [ ] Resource has `aws.service.type: "gen_ai_agent"` and `aws.log.group.names`
+- [ ] Resource has `aws.service.type: "gen_ai_agent"`, `cloud.resource_id` (full
+      `runtime/<id>/endpoint/<name>` ARN), and `aws.log.group.names` ending in
+      `-{ENDPOINT}` (e.g. `-DEFAULT`)
+- [ ] `aws.log.group.names`, the `x-aws-log-group` OTLP header, and the EMF exporter
+      `log_group_name` all point to the **same** `-{ENDPOINT}`-suffixed group
 - [ ] Tracer scope is `"strands.telemetry.tracer"` (not `__name__`)
 - [ ] Agent span named `invoke_agent <name>` with `gen_ai.operation.name`, `gen_ai.system`,
       `gen_ai.agent.name`, `gen_ai.request.model`
@@ -230,7 +258,10 @@ Read `references/pitfalls.md` for the complete pitfalls table. The three most co
 | Error | Cause | Fix |
 |---|---|---|
 | `AgentSpanMappingException: Failed to parse user_query` | `role: "tool"` in invoke_agent input | Remove — only `role: "user"` in input |
-| `LogEventMissingException: span data is incomplete` | Missing per-tool I/O summary | Emit in `post_tool_use_hook` before `span.end()` |
+| `LogEventMissingException: ...invoke_agent <name> is missing a corresponding log event` | Logs exported to `/runtimes/{AGENT_ID}` but eval queries `/runtimes/{AGENT_ID}-{ENDPOINT}` | Use `{AGENT_ID}-{ENDPOINT}` in **all three** places (resource attr, OTLP header, EMF exporter) |
+| `LogEventMissingException: ...tool.<name>` | Missing per-tool I/O summary | Emit in `post_tool_use_hook` before `span.end()` |
+| Eval can't discover any spans for `--runtime-arn` | Resource missing `cloud.resource_id` | Add full endpoint ARN `arn:aws:bedrock-agentcore:<region>:<acct>:runtime/<id>/endpoint/<name>` |
+| `TypeError: LogRecord.__init__() got unexpected keyword 'resource'` | opentelemetry-sdk ≥ 1.40 removed the kwarg | Drop `resource=resource` from every `LogRecord(...)` call; the LoggerProvider already carries the resource |
 | Per-tool I/O log gets wrong spanId | `_emit_structured_log` uses current span | Pass `span_context=` with tool span's context |
 
 ## Reference implementation
