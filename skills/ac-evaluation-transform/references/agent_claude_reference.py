@@ -32,7 +32,12 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import HookMatcher
 from opentelemetry import baggage, context, metrics, trace
 from opentelemetry._logs import set_logger_provider, SeverityNumber
-from opentelemetry.sdk._logs import LoggerProvider, LogRecord
+from opentelemetry.sdk._logs import LoggerProvider
+# LogRecord moved out of opentelemetry.sdk._logs in opentelemetry-sdk >= 1.40.
+try:
+    from opentelemetry.sdk._logs import LogRecord            # < 1.40
+except ImportError:
+    from opentelemetry.sdk._logs._internal import LogRecord  # >= 1.40
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader

@@ -10,9 +10,12 @@ description: >-
   encounters AgentCore evaluation errors like AgentSpanMappingException,
   LogEventMissingException, "span data is incomplete", "missing a corresponding log
   event", or when their agent's spans appear in `aws/spans` but evaluators still report
-  missing log events (the classic log-group-suffix mismatch). This skill modifies only
-  the instrumentation layer — it never changes the agent's application logic, tools, or
-  prompts.
+  missing log events (the classic log-group-suffix mismatch). Covers BOTH standalone/local
+  agents (build the OTEL providers yourself) AND agents deployed to an AgentCore Runtime with
+  observability enabled (reuse the runtime's ADOT-configured providers) — so also trigger when
+  the user wants a deployed Claude Agent SDK runtime's traces to show up in AgentCore
+  Observability / GenAI dashboards. This skill modifies only the instrumentation layer — it
+  never changes the agent's application logic, tools, or prompts.
 ---
 
 # AC Evaluation Transform
@@ -46,23 +49,64 @@ The 9 evaluators that must pass:
 | `Builtin.GoalSuccessRate` | Session |
 | `Builtin.ToolSelectionAccuracy` | Tool span |
 
+## First decide: where will this agent run?
+
+The instrumentation is the same telemetry, but **who owns the OTEL providers differs** by
+deployment target. Getting this wrong is the most common reason a "correct-looking" transform
+still produces zero evaluable telemetry. Pick your target before writing any code:
+
+| Target | Who sets up the OTEL SDK? | What you do |
+|---|---|---|
+| **A. Standalone / local process** (a script you run yourself, `python agent.py`, a non-AgentCore container) | **You do.** Nothing configures OpenTelemetry for you. | Build the `TracerProvider` / `LoggerProvider` / `MeterProvider` + AWS OTLP exporters yourself (Steps 2–5). This is what `references/agent_claude_reference.py` shows. |
+| **B. Deployed AgentCore Runtime** with `instrumentation.enableOtel: true` (or the container launched via `opentelemetry-instrument` + the AWS distro) | **The runtime does.** ADOT installs the global providers, AWS OTLP exporters, the full `OTEL_RESOURCE_ATTRIBUTES` (`cloud.resource_id`, `aws.log.group.names=…-{ENDPOINT}`, `aws.service.type`), and the `x-aws-log-group` OTLP header — before your code imports. | **REUSE the global providers.** Do NOT build your own — OTEL providers are set-once, so a second `TracerProvider()` / `LoggerProvider()` is silently ignored and your spans/logs never export. Read `references/agentcore-runtime.md`. |
+
+**How to tell you're in target B at runtime:** `os.getenv("AGENT_OBSERVABILITY_ENABLED")` is
+truthy and `OTEL_RESOURCE_ATTRIBUTES` already contains `cloud.resource_id`. In that case skip
+the provider/exporter construction in Steps 2–5 and instead call `trace.get_tracer(...)`,
+`get_logger_provider().get_logger(...)`, and `metrics.get_meter(...)` — the resource attributes,
+exporters, and log-group routing the rest of this skill describes are already in place. Steps
+6–11 (helpers, hooks, span hierarchy, I/O summaries) are **identical** for both targets.
+
+If you're writing one agent file that must work both locally and deployed, gate the provider
+setup on target B and fall back to a **no-op** when OTEL isn't available or observability is
+off, so the agent never crashes in environments where telemetry isn't wanted (local dev, unit
+tests). `references/agentcore-runtime.md` has the full dual-mode pattern.
+
 ## Transformation process
 
 Work through these steps in order. Each step references a detail file — read it when you
 reach that step. **Do not change the agent's application logic, tools, or prompts.**
 
+> **Target B (deployed AgentCore Runtime) note:** Steps 2–5 build the providers/exporters
+> from scratch. In a deployed runtime these already exist — reuse them (see the decision table
+> above and `references/agentcore-runtime.md`) and jump to Step 6. Steps 6–11 apply to both targets.
+
 ### Step 1: Add dependencies and imports
 
 Read `references/otel-setup.md` for the full import list and provider setup.
 
-Required packages:
-- `opentelemetry-api`, `opentelemetry-sdk` (**≥ 1.40** — older releases still accept the
-  `LogRecord(resource=)` kwarg the reference impl used to pass, but 1.40 removed it. The
-  reference impl here no longer passes it, so any 1.x release works, but docs assume
-  modern versions.)
+Required packages (Target A / standalone only — Target B gets these from the runtime image):
+- `opentelemetry-api`, `opentelemetry-sdk` (**≥ 1.40** — see the two version gotchas below)
 - `opentelemetry-exporter-otlp-proto-http`
 - `aws-opentelemetry-distro` (provides `OTLPAwsSpanExporter` + `AwsCloudWatchEmfExporter`)
 - `aws-requests-auth`, `botocore`, `requests`
+
+**Two `opentelemetry-sdk` ≥ 1.40 gotchas (both hit live on 1.40.0, the version the current
+`aws-opentelemetry-distro` 0.17.x pulls in):**
+1. **`LogRecord` moved.** `from opentelemetry.sdk._logs import LogRecord` raises `ImportError`
+   on ≥ 1.40 — that module now exports `LoggerProvider`, `Logger`, `LoggingHandler`,
+   `ReadableLogRecord`, `ReadWriteLogRecord`, but not `LogRecord`. Import defensively so the
+   same file works across versions:
+   ```python
+   try:
+       from opentelemetry.sdk._logs import LogRecord            # < 1.40
+   except ImportError:
+       from opentelemetry.sdk._logs._internal import LogRecord  # >= 1.40
+   ```
+   The constructor still accepts `timestamp / body / severity_number / severity_text /
+   trace_id / span_id / trace_flags / attributes` (verified on 1.40.0).
+2. **No `resource=` kwarg.** `LogRecord(...)` no longer accepts `resource=` on ≥ 1.40 — the
+   `LoggerProvider` carries the resource and attaches it at emit time. Never pass it.
 
 ### Step 2: Create the OTEL Resource
 
@@ -210,13 +254,29 @@ Read `references/structured-logs.md` → "I/O summary format" section.
 5. No bare-string `content` entries (must always be a dict)
 6. The log must be emitted AFTER `context.detach(cycle_ctx)` so `invoke_agent` is current
 
-### Step 10: Add session ID via argparse + baggage
+### Step 10: Add the session ID
+
+`session.id` ties a session's spans together for the session-level `GoalSuccessRate`
+evaluator. Put it in baggage (so the `BaggageSpanProcessor` copies it onto every span and
+`_emit_structured_log` stamps it on the logs) and, belt-and-suspenders, set it directly on
+the `invoke_agent` span attributes (the reused ADOT pipeline in Target B may not include a
+baggage processor):
 
 ```python
-session_id = args.session_id or str(uuid.uuid4())
-ctx = baggage.set_baggage("session.id", session_id)
-context.attach(ctx)
+if session_id:
+    context.attach(baggage.set_baggage("session.id", session_id))
+    agent_attrs["session.id"] = session_id   # also set on the invoke_agent span
 ```
+
+**Where `session_id` comes from depends on the target:**
+- **Target A (standalone):** `argparse` → `session_id = args.session_id or str(uuid.uuid4())`.
+- **Target B (deployed AgentCore Runtime):** the runtime delivers it via the entrypoint's
+  request context, but **only when the 2nd parameter is literally named `context`**:
+  ```python
+  @app.entrypoint
+  async def invoke(payload: dict, context=None):   # MUST be named `context`
+      session_id = getattr(context, "session_id", None)
+  ```
 
 ### Step 11: Add clean shutdown
 
@@ -227,6 +287,18 @@ _meter_provider.shutdown() # Metrics → CloudWatch EMF
 ```
 
 `provider.shutdown()` must come first — it flushes trace spans with token attributes.
+
+**Target B:** you don't hold references to providers you created, so resolve them from the
+API and guard the calls (some are no-ops depending on the ADOT setup):
+```python
+for getter in (trace.get_tracer_provider, get_logger_provider, metrics.get_meter_provider):
+    fn = getattr(getter(), "shutdown", None)
+    if callable(fn):
+        fn()
+```
+Also — the runtime handles process lifecycle, so don't shut down after every single request
+if the process is long-lived; flush per-turn only if you need the final turn's spans
+immediately. A `force_flush()` per turn + `shutdown()` at process exit is the safe pattern.
 
 ## Verification checklist
 
@@ -250,6 +322,14 @@ After transformation, verify these properties:
 - [ ] `gen_ai.usage.*` token attributes on `invoke_agent` span
 - [ ] All three providers shut down on exit
 - [ ] `_sanitize()` applied to all user-provided strings
+- [ ] **Target B only:** you did NOT construct new providers/exporters — you reused the
+      global ones (`trace.get_tracer` / `get_logger_provider().get_logger` /
+      `metrics.get_meter`); the resource attrs + log-group header come from the runtime
+- [ ] **Target B only:** the openinference `claude_agent_sdk` auto-instrumentor is disabled
+      (`OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=claude_agent_sdk`) so it doesn't emit competing
+      spans that break span↔log matching
+- [ ] **Target B only:** the entrypoint's 2nd param is named `context` (for `session_id`)
+- [ ] Instrumentation is a no-op when observability is off / OTEL is missing (local + tests)
 
 ## Common evaluation errors and fixes
 
@@ -262,10 +342,20 @@ Read `references/pitfalls.md` for the complete pitfalls table. The three most co
 | `LogEventMissingException: ...tool.<name>` | Missing per-tool I/O summary | Emit in `post_tool_use_hook` before `span.end()` |
 | Eval can't discover any spans for `--runtime-arn` | Resource missing `cloud.resource_id` | Add full endpoint ARN `arn:aws:bedrock-agentcore:<region>:<acct>:runtime/<id>/endpoint/<name>` |
 | `TypeError: LogRecord.__init__() got unexpected keyword 'resource'` | opentelemetry-sdk ≥ 1.40 removed the kwarg | Drop `resource=resource` from every `LogRecord(...)` call; the LoggerProvider already carries the resource |
+| `ImportError: cannot import name 'LogRecord' from 'opentelemetry.sdk._logs'` | opentelemetry-sdk ≥ 1.40 moved it to `_logs._internal` | `try: from opentelemetry.sdk._logs import LogRecord` / `except ImportError: from opentelemetry.sdk._logs._internal import LogRecord` |
 | Per-tool I/O log gets wrong spanId | `_emit_structured_log` uses current span | Pass `span_context=` with tool span's context |
+| **Deployed runtime:** spans/logs never appear even though the code "looks right" | Rebuilt your own `TracerProvider`/`LoggerProvider` on top of the runtime's ADOT setup — OTEL is set-once, so yours is ignored | Reuse the global providers via `get_tracer`/`get_logger_provider`/`get_meter` (Target B, `references/agentcore-runtime.md`) |
+| **Deployed runtime:** duplicate/overlapping agent + tool spans, evaluator can't map spans→logs | The openinference `claude_agent_sdk` auto-instrumentor also emitted spans alongside your hand-built ones | Set `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=claude_agent_sdk` in the container env |
+| **Deployed runtime:** `session_id` is always `None`, `GoalSuccessRate` can't group the session | Entrypoint 2nd param isn't named `context` | Name it exactly `context`: `async def invoke(payload, context=None)` |
 
-## Reference implementation
+## Reference implementations
 
-Read `references/agent_claude_reference.py` — a fully working Claude Agent SDK agent with
-all OTEL instrumentation applied. It demonstrates every pattern from Steps 1–11 in a
-complete, tested agent that passes all 9 AgentCore evaluators with zero errors.
+- `references/agent_claude_reference.py` — **Target A (standalone).** A fully working Claude
+  Agent SDK CLI agent that builds all providers/exporters itself and applies every pattern
+  from Steps 1–11. Passes all 9 AgentCore evaluators with zero errors.
+- `references/agentcore-runtime.md` — **Target B (deployed AgentCore Runtime).** How to
+  reuse the runtime's ADOT-configured global providers instead of building your own, wire
+  the hooks + turn driver into a `build_agent_options()` / `@app.entrypoint` architecture,
+  the dual-mode no-op fallback, and the container env (`OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`).
+  This is the path proven end-to-end on a live AgentCore Runtime (all 9 evaluators returned
+  scores, zero errors).
