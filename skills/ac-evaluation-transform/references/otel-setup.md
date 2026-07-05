@@ -1,5 +1,11 @@
 # OTEL Setup: Imports, Resource, Providers, and Exporters
 
+> **Applies to Target A (standalone/local) only.** If the agent runs inside a deployed
+> AgentCore Runtime with observability enabled, the AWS distro already created these
+> providers/exporters and the Resource — do NOT rebuild them (OTEL is set-once). Reuse the
+> globals instead; see `references/agentcore-runtime.md`. The imports, helpers, and the
+> `LogRecord` version note below still apply to both targets.
+
 ## Table of Contents
 1. [Full import list](#full-import-list)
 2. [Resource creation](#resource-creation)
@@ -37,7 +43,12 @@ from amazon.opentelemetry.distro.exporter.otlp.aws.traces.otlp_aws_span_exporter
 from aws_requests_auth.boto_utils import BotoAWSRequestsAuth
 from opentelemetry import baggage, context, metrics, trace
 from opentelemetry._logs import set_logger_provider, SeverityNumber
-from opentelemetry.sdk._logs import LoggerProvider, LogRecord
+from opentelemetry.sdk._logs import LoggerProvider
+# LogRecord moved out of opentelemetry.sdk._logs in opentelemetry-sdk >= 1.40.
+try:
+    from opentelemetry.sdk._logs import LogRecord            # < 1.40
+except ImportError:
+    from opentelemetry.sdk._logs._internal import LogRecord  # >= 1.40
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
