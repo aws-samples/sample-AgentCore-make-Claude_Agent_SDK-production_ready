@@ -91,6 +91,36 @@ async with ClaudeSDKClient(options=options) as client:
 - **Standalone (Target A):** build your own providers/exporters (AWS SigV4 OTLP)
   before calling `instrument()`, as with any OpenTelemetry app.
 
+## Supported surface & limitations
+
+This release targets the **most common Claude Agent SDK pattern** and is verified
+against it end-to-end (all built-in AgentCore evaluators pass, zero errors):
+
+- ✅ A `ClaudeSDKClient` used as `await client.query(...)` → `async for message in
+  client.receive_response()`.
+- ✅ `TextBlock` and `ToolUseBlock` content; in-process (`@tool`) and MCP tools.
+- ✅ Subagents (Task tool) and user-defined Pre/PostToolUse hooks (merged, not
+  replaced).
+- ✅ Deployed on AgentCore Runtime with observability enabled (reuses the ADOT
+  global providers).
+
+Not yet covered (telemetry may be incomplete for these — roadmap):
+
+- ⏳ The **module-level `query()`** one-shot helper — only `ClaudeSDKClient` is
+  wrapped today. An agent written as `async for m in query(...)` gets no telemetry.
+- ⏳ The lower-level **`receive_messages()`** iterator (turn won't finalize).
+- ⏳ **Extended thinking** (`ThinkingBlock`) and **server-side tools**
+  (`ServerToolUseBlock` / `ServerToolResultBlock`, e.g. web search) — these bypass
+  the tool hooks, so they get no tool span / per-tool log.
+- ⏳ **Streaming (`AsyncIterable`) prompts** — the user query is captured only when
+  the prompt is a string.
+- ⏳ **Concurrent turns on a single client** (`asyncio.gather`) — per-turn state is
+  single-slot per instance.
+
+If your agent uses one of the ⏳ paths, telemetry (and therefore evaluation
+coverage) may be partial. These are tracked for a follow-up; contributions
+welcome.
+
 ## Coexistence
 
 Do not run this alongside `otel-instrumentation-claude-agent-sdk` — both wrap the
