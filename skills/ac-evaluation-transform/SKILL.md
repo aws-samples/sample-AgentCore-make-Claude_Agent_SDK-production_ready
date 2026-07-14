@@ -35,6 +35,18 @@ The Claude Agent SDK has **no built-in OTEL auto-instrumentation** (unlike Stran
 This skill adds traces, structured logs, and CloudWatch EMF metrics manually — targeting
 **byte-level parity** with Strands so AgentCore Evaluations treats both agents identically.
 
+> **Prefer zero code?** The same transform is available pre-packaged as a standard
+> OpenTelemetry instrumentation plugin at
+> [`packages/otel-instrumentation-claude-agent-sdk-strands/`](../../packages/otel-instrumentation-claude-agent-sdk-strands/).
+> `pip install` it and run under `opentelemetry-instrument` and any Claude Agent SDK
+> agent emits this exact Strands-parity telemetry with **no code changes** — it wraps
+> `ClaudeSDKClient` with `wrapt` and auto-loads via an `opentelemetry_instrumentor`
+> entry point. Use this skill when you want to understand the mechanics, do a bespoke
+> in-code transform, or debug an evaluation failure; use the package when you just want
+> a deployed agent's evaluators to pass. The package's telemetry has been verified
+> end-to-end on a live AgentCore Runtime (all built-in evaluators return scores, zero
+> errors).
+
 The 9 evaluators that must pass:
 
 | Evaluator | Level |
@@ -359,3 +371,9 @@ Read `references/pitfalls.md` for the complete pitfalls table. The three most co
   the dual-mode no-op fallback, and the container env (`OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`).
   This is the path proven end-to-end on a live AgentCore Runtime (all 9 evaluators returned
   scores, zero errors).
+- [`packages/otel-instrumentation-claude-agent-sdk-strands/`](../../packages/otel-instrumentation-claude-agent-sdk-strands/)
+  — **the packaged, zero-code form of this skill.** A pip-installable
+  `BaseInstrumentor` that applies the Target-B patterns automatically via `wrapt`
+  interception of `ClaudeSDKClient` (no `run_instrumented`-style loop rewrite, no hook
+  wiring in your agent). Install it + `opentelemetry-instrument` and you're done. Reach
+  for the package to ship; reach for this skill to learn, customize, or debug.
